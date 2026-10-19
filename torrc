@@ -30,9 +30,9 @@ FetchDirInfoExtraEarly 1
 
 PathsNeededToBuildCircuits 0.25
 
-ClientTransportPlugin webtunnel exec webtunnel.exe
-ClientTransportPlugin obfs4 exec obfs4proxy.exe
-ClientTransportPlugin snowflake exec snowflake-client.exe
+ClientTransportPlugin webtunnel exec Transport/webtunnel.exe
+ClientTransportPlugin obfs4 exec Transport/obfs4proxy.exe
+ClientTransportPlugin snowflake exec Transport/snowflake-client.exe
 
 DataDirectory data
 DisableDebuggerAttachment 1
