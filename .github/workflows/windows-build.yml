@@ -1,0 +1,64 @@
+name: Windows build
+
+on:
+  push:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: msys2 {0}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git autoconf automake libtool m4 make patch zip
+          pacboy: >-
+            gcc:p pkgconf:p libevent:p openssl:p zlib:p xz:p zstd:p
+
+      - name: Download source
+        run: git clone --depth 1 https://gitlab.torproject.org/tpo/core/tor.git tor-src
+
+      - name: Configure and build
+        run: |
+          cd tor-src
+          autoreconf -fi
+          mkdir -p ../build
+          cd ../build
+          ZSTD_CFLAGS='-L/mingw64/include' ZSTD_LIBS='-L/mingw64/lib -lzstd' \
+            ../tor-src/configure \
+              --build=x86_64-w64-mingw32 \
+              --host=x86_64-w64-mingw32 \
+              --with-openssl-dir=/mingw64 \
+              --disable-asciidoc \
+              --disable-gcc-hardening \
+              CFLAGS='-D__USE_MINGW_ANSI_STDIO=0'
+          make -j"$(nproc)"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/src/app/tor.exe dist/
+          ldd build/src/app/tor.exe | awk '/mingw64/ {print $3}' | sort -u | while read -r dll; do
+            [ -f "$dll" ] && cp "$dll" dist/
+          done
+          (cd dist && zip -9 ../tor-windows-x86_64.zip ./*)
+          ./dist/tor.exe --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tor-windows-x86_64
+          path: tor-windows-x86_64.zip
+
+      - name: Upload config log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log
+          path: build/config.log
