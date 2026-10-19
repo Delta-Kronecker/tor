@@ -138,7 +138,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/build-android"
           OBJS=$(find . -name '*.o' -not -path '*/test/*' -not -path '*/tools/*' | sort)
           echo "linking $(echo "$OBJS" | wc -l) objects"
-          "$TOOLCHAIN/bin/clang" -shared -fPIC -o libtor.so $OBJS \
+          "$TOOLCHAIN/bin/${{ matrix.clang }}" -shared -fPIC -o libtor.so $OBJS \
             -L"$DEPS/lib" -L"$DEPS/lib64" \
             -Wl,--allow-multiple-definition \
             -lssl -lcrypto \
