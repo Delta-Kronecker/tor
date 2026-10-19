@@ -1,0 +1,153 @@
+From bb98fe3020c604d6808e84709f0ccc6652e9cf85 Mon Sep 17 00:00:00 2001
+From: Delta-Kronecker <your-email@example.com>
+Date: Fri, 14 Aug 2026 19:52:56 +0330
+Subject: [PATCH] tor: rebuild sets when a sole weak leg is closed; track
+ per-set streams/bytes
+
+The launcher can now prune even a set's only (weak) leg. When such a close
+removes the set, linked_circuit_closed() relaunches a fresh leg for the same
+nonce unless the close was part of a genuine protocol teardown (in_full_teardown)
+or a recovery unlinked set took ownership of the conflux object. This makes
+1-leg sets recover automatically instead of disappearing.
+
+CONFLUX QUERY LINKED lines now carry STREAMS= (streams attached since the set
+was created) and BYTES= (total payload exchanged), counted in
+link_apconn_to_circ() and circuit_sent/read_valid_data(). The launcher
+displays both per set and drops the now-unused --watch-min-legs option.
+---
+ tor-src/src/core/or/circuituse.c          | 18 ++++++++++++++++++
+ tor-src/src/core/or/conflux_pool.c        | 21 ++++++++++++++++++---
+ tor-src/src/core/or/conflux_st.h          |  9 +++++++++
+ tor-src/src/feature/control/control_cmd.c | 10 ++++++++--
+ 4 files changed, 53 insertions(+), 5 deletions(-)
+
+diff --git a/src/core/or/circuituse.c b/src/core/or/circuituse.c
+index 453bb9d..a60eb89 100644
+--- a/src/core/or/circuituse.c
++++ b/src/core/or/circuituse.c
+@@ -2645,6 +2645,12 @@ link_apconn_to_circ(entry_connection_t *apconn, origin_circuit_t *circ,
+   circ->p_streams = ENTRY_TO_EDGE_CONN(apconn);
+   conflux_update_p_streams(circ, ENTRY_TO_EDGE_CONN(apconn));
+ 
++  /* TorJet: count the stream against its conflux set, if any. */
++  conflux_t *stream_cfx = TO_CIRCUIT(circ)->conflux;
++  if (stream_cfx) {
++    stream_cfx->total_streams++;
++  }
++
+   if (connection_edge_is_rendezvous_stream(ENTRY_TO_EDGE_CONN(apconn))) {
+     /* We are attaching a stream to a rendezvous circuit.  That means
+      * that an attempt to connect to a hidden service just
+@@ -3212,6 +3218,12 @@ circuit_sent_valid_data(origin_circuit_t *circ, uint16_t relay_body_len)
+   circ->n_overhead_written_circ_bw =
+       tor_add_u32_nowrap(circ->n_overhead_written_circ_bw,
+                          RELAY_PAYLOAD_SIZE_MAX-relay_body_len);
++
++  /* TorJet: accumulate against the conflux set, if any. */
++  conflux_t *cfx = TO_CIRCUIT(circ)->conflux;
++  if (cfx) {
++    cfx->bytes_sent += relay_body_len;
++  }
+ }
+ 
+ /**
+@@ -3232,4 +3244,10 @@ circuit_read_valid_data(origin_circuit_t *circ, uint16_t relay_body_len)
+   circ->n_overhead_read_circ_bw =
+       tor_add_u32_nowrap(circ->n_overhead_read_circ_bw,
+                          RELAY_PAYLOAD_SIZE_MAX-relay_body_len);
++
++  /* TorJet: accumulate against the conflux set, if any. */
++  conflux_t *cfx = TO_CIRCUIT(circ)->conflux;
++  if (cfx) {
++    cfx->bytes_recv += relay_body_len;
++  }
+ }
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index f080097..c94cd83 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1778,11 +1778,26 @@ linked_circuit_closed(circuit_t *circ)
+    * launcher's quality monitor), launch a replacement so the set can refill
+    * toward its target leg count. The budget refund in cfx_del_leg() keeps
+    * this sustainable for long sessions. Mirrors the unlinked recovery logic
+-   * in unlinked_circuit_closed(). */
+-  if (!full_teardown && !shutting_down &&
+-      !have_been_under_memory_pressure() && CIRCUIT_IS_ORIGIN(circ)) {
++   * in unlinked_circuit_closed().
++   *
++   * TorJet: the same applies when the closed leg was the last one of the set,
++   * so the set was removed from the linked pool above. A genuine teardown is
++   * told apart from a deliberate close (such as the launcher removing a weak
++   * sole leg) by in_full_teardown: conflux_mark_all_for_close() only sets it
++   * while the linked set still exists in the pool, which never happens here
++   * for a deliberate sole-leg close. If the close was deliberate, rebuild the
++   * set with the same nonce so a new leg is immediately requested. */
++  if (!shutting_down && !have_been_under_memory_pressure() &&
++      CIRCUIT_IS_ORIGIN(circ)) {
+     conflux_t *cfx = linked_pool_get(nonce, is_client);
+     if (cfx && CONFLUX_NUM_LEGS(cfx) > 0 && !cfx->in_full_teardown) {
++      /* Set survived the close. Refill toward the target leg count. */
++      conflux_launch_leg(nonce);
++    } else if (!cfx && circ->conflux && !circ->conflux->in_full_teardown) {
++      /* This was the last leg and the set is gone. Unless a recovery unlinked
++       * set shared the conflux object (that case handed ownership over above,
++       * nullifying circ->conflux) or the close was part of a genuine teardown,
++       * rebuild the set with the same nonce. */
+       conflux_launch_leg(nonce);
+     }
+   }
+diff --git a/src/core/or/conflux_st.h b/src/core/or/conflux_st.h
+index 18961fb..09ce0a9 100644
+--- a/src/core/or/conflux_st.h
++++ b/src/core/or/conflux_st.h
+@@ -138,6 +138,15 @@ struct conflux_t {
+    * because there is a maximum allowed in order to avoid side channel(s). */
+   unsigned int num_leg_launch;
+ 
++  /** TorJet: cumulative number of streams that have been attached to this set
++   * since it was created. */
++  uint64_t total_streams;
++
++  /** TorJet: cumulative payload bytes sent and received by all legs of this
++   * set since it was created. */
++  uint64_t bytes_sent;
++  uint64_t bytes_recv;
++
+   /**
+    * PolicyHint: Predicted ports/protocol shorthand..
+    *
+diff --git a/src/feature/control/control_cmd.c b/src/feature/control/control_cmd.c
+index 8cd0888..6bc301c 100644
+--- a/src/feature/control/control_cmd.c
++++ b/src/feature/control/control_cmd.c
+@@ -1450,6 +1450,9 @@ static const control_cmd_syntax_t conflux_syntax = {
+  *   CONFLUX QUERY
+  *      Print one line for every leg circuit of every conflux set, using the
+  *      same (truncated) set id as the CONFLUX_ID= field of circuit-status.
++ *      LINKED lines also carry STREAMS= (number of streams the set has had
++ *      since it was created) and BYTES= (total payload bytes exchanged by the
++ *      set so far). These are set-wide and identical across the set's legs.
+  *
+  *   CONFLUX ADD <set-id>
+  *      Launch a new leg for the conflux set identified by <set-id>, which is
+@@ -1493,12 +1496,15 @@ handle_control_conflux(control_connection_t *conn,
+           strlcpy(exit_hex, "?", sizeof(exit_hex));
+         }
+         smartlist_add_asprintf(reply,
+-            "SET=%s CIRC=%lu EXIT=%s LEGS=%u STATE=LINKED RTT_US=%" PRIu64,
++            "SET=%s CIRC=%lu EXIT=%s LEGS=%u STATE=LINKED RTT_US=%" PRIu64
++            " STREAMS=%" PRIu64 " BYTES=%" PRIu64,
+             hex_str((const char *)nonce, DIGEST256_LEN/2),
+             (unsigned long)circ->global_identifier,
+             exit_hex,
+             CONFLUX_NUM_LEGS(cfx),
+-            conflux_get_circ_rtt(&circ->base_));
++            conflux_get_circ_rtt(&circ->base_),
++            cfx->total_streams,
++            cfx->bytes_sent + cfx->bytes_recv);
+       } else {
+         smartlist_add_asprintf(reply, "SET=%s CIRC=%lu EXIT=? STATE=UNLINKED",
+             hex_str((const char *)nonce, DIGEST256_LEN/2),
+-- 
+2.53.0.windows.1
+

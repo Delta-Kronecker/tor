@@ -1,0 +1,97 @@
+From 7bdca69ff643bcd4c2b4c713e8ab2d3b1c16dff9 Mon Sep 17 00:00:00 2001
+From: Delta-Kronecker <your-email@example.com>
+Date: Wed, 12 Aug 2026 17:28:13 +0330
+Subject: [PATCH] tor: bound total conflux sets at ConfluxNumSets
+
+conflux_predict_new counted only 'usable' (never-used) linked sets toward
+the prebuilt target, so a set that had served a stream was treated as
+missing and replaced even while still healthy. The replacement plus the
+in-flight unlinked set then promoted past the configured count: with
+ConfluxNumSets=5 / ConfluxNumLinkedSets=6 the pool still reached 7
+linked sets.
+
+Count every linked set (used or not) toward the total, so the sum of
+linked + unlinked sets is held at the prebuilt target exactly. A used
+set still serves new streams via conflux multiplexing, so it does not
+need a replacement. The now-unused count_client_usable_sets helper is
+removed.
+---
+ tor-src/src/core/or/conflux_params.c |  9 ++++----
+ tor-src/src/core/or/conflux_pool.c   | 34 ++++++----------------------
+ 2 files changed, 12 insertions(+), 31 deletions(-)
+
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index ffbbcf4..0f91c87 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -332,10 +332,11 @@ conflux_params_new_consensus(const networkstatus_t *ns)
+ 
+   /* TorJet extension: the torrc ConfluxNumSets / ConfluxNumLinkedSets options
+    * (0 = consensus default) override the consensus cfx_max_prebuilt_set /
+-   * cfx_max_linked_set values, so the user controls how many sets are prebuilt
+-   * and the hard cap on linked sets. When only ConfluxNumSets is set, the
+-   * linked-set cap defaults to exactly that many so no extra sets are built on
+-   * top of sets that are currently in use. */
++   * cfx_max_linked_set values. ConfluxNumSets is the number of sets kept alive
++   * (the pool in conflux_predict_new bounds the total, linked + unlinked, at
++   * this value); ConfluxNumLinkedSets is a ceiling on linked sets and only
++   * binds when set below ConfluxNumSets. When only ConfluxNumSets is set the
++   * linked-set ceiling defaults to exactly that many. */
+   {
+     const or_options_t *opts = get_options();
+     if (opts && opts->ConfluxNumSets > 0) {
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index 2d134ad..165a8f6 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1351,31 +1351,6 @@ conflux_add_middles_to_exclude_list(const origin_circuit_t *orig_circ,
+   }
+ }
+ 
+-/** Return the number of unused client linked set. */
+-static int
+-count_client_usable_sets(void)
+-{
+-  int count = 0;
+-
+-  DIGEST256MAP_FOREACH(client_linked_pool, key, conflux_t *, cfx) {
+-    conflux_leg_t *leg = smartlist_get(cfx->legs, 0);
+-    if (BUG(!leg->circ)) {
+-      log_warn(LD_BUG, "Client conflux linked set leg without a circuit");
+-      continue;
+-    }
+-
+-    /* The maze marks circuits used several different ways. If any of
+-     * them are marked for this leg, launch a new one. */
+-    if (!CONST_TO_ORIGIN_CIRCUIT(leg->circ)->unusable_for_new_conns &&
+-        !CONST_TO_ORIGIN_CIRCUIT(leg->circ)->isolation_values_set &&
+-        !leg->circ->timestamp_dirty) {
+-      count++;
+-    }
+-  } DIGEST256MAP_FOREACH_END;
+-
+-  return count;
+-}
+-
+ /** Determine if we need to launch new conflux circuits for our preemptive
+  * pool.
+  *
+@@ -1401,8 +1376,13 @@ conflux_predict_new(time_t now)
+   }
+ 
+   /* Count the linked and unlinked to get the total number of sets we have
+-   * (will have). */
+-  int num_linked = count_client_usable_sets();
++   * (will have). Every linked set counts, used or not: upstream only counted
++   * "usable" linked sets, so a set that had served a stream was treated as
++   * missing and replaced even while still healthy, letting the pool grow past
++   * the prebuilt target (a set currently in use still serves new streams via
++   * conflux multiplexing, so it does not need a replacement). Counting all
++   * linked sets is what keeps the total bounded at the prebuilt target. */
++  int num_linked = digest256map_size(client_linked_pool);
+   int num_unlinked = digest256map_size(client_unlinked_pool);
+   int num_set = num_unlinked + num_linked;
+   int max_prebuilt = conflux_params_get_max_prebuilt();
+-- 
+2.53.0.windows.1
+

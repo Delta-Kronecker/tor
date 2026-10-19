@@ -1,0 +1,267 @@
+From 7b74ed7165da20b1b1ecd39b6c3892143dd414ae Mon Sep 17 00:00:00 2001
+From: Delta-Kronecker <your-email@example.com>
+Date: Tue, 11 Aug 2026 21:54:35 +0330
+Subject: [PATCH] conflux: add CONFLUX control command (QUERY/ADD/SET) and
+ ConfluxNumLegs torrc override
+
+---
+ tor-src/src/app/config/config.c           |   5 +
+ tor-src/src/app/config/or_options_st.h    |   6 ++
+ tor-src/src/core/or/conflux_params.c      |  20 ++++
+ tor-src/src/core/or/conflux_params.h      |   1 +
+ tor-src/src/feature/control/control_cmd.c | 126 ++++++++++++++++++++++
+ 5 files changed, 158 insertions(+)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index c56ee0e..4e39b9e 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -384,6 +384,7 @@ static const config_var_t option_vars_[] = {
+   V(ConfluxEnabled,              AUTOBOOL, "auto"),
+   VAR("ConfluxClientUX",         STRING,   ConfluxClientUX_option,
+           "throughput"),
++  V(ConfluxNumLegs,              INT,      "0"),
+   V(ConnLimit,                   POSINT,     "1000"),
+   V(ConnDirectionStatistics,     BOOL,     "0"),
+   V(ConstrainedSockets,          BOOL,     "0"),
+@@ -3586,6 +3587,10 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+              "'latency_lowmem', or 'throughput_lowmem'");
+   }
+ 
++  if (options->ConfluxNumLegs < 0 || options->ConfluxNumLegs > 16) {
++    REJECT("ConfluxNumLegs must be between 0 (consensus default) and 16");
++  }
++
+   if (options_validate_publish_server(old_options, options, msg) < 0)
+     return -1;
+ 
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index d7aaf83..5217067 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -753,6 +753,12 @@ struct or_options_t {
+   char *ConfluxClientUX_option;
+   int ConfluxClientUX;
+ 
++  /** Number of legs to build per conflux set. 0 (default) means "use the
++   * consensus default" (cfx_num_legs, usually 2); any positive value overrides
++   * it so every set is always kept at exactly this many legs. This is a
++   * TorJet extension. */
++  int ConfluxNumLegs;
++
+   /** The length of time that we think a consensus should be fresh. */
+   int V3AuthVotingInterval;
+   /** The length of time we think it will take to distribute votes. */
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index db9e21f..b8d36e1 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -239,6 +239,16 @@ conflux_params_get_num_legs_set(void)
+   return num_legs_set;
+ }
+ 
++/** TorJet extension: override the number of legs per set at runtime
++ * (e.g. from the CONFLUX SET control command). Ignored if out of range. */
++void
++conflux_params_set_num_legs(uint8_t n)
++{
++  if (n > 0 && n <= 16) {
++    num_legs_set = n;
++  }
++}
++
+ /** Return the maximum number of legs per set. */
+ uint8_t
+ conflux_params_get_max_legs_set(void)
+@@ -305,6 +315,16 @@ conflux_params_new_consensus(const networkstatus_t *ns)
+                             NUM_LEGS_SET_DEFAULT,
+                             NUM_LEGS_SET_MIN, NUM_LEGS_SET_MAX);
+ 
++  /* TorJet extension: the torrc ConfluxNumLegs option (0 = consensus default)
++   * overrides the consensus cfx_num_legs_set, so every set is always kept at
++   * exactly that many legs. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts && opts->ConfluxNumLegs > 0) {
++      num_legs_set = opts->ConfluxNumLegs;
++    }
++  }
++
+   max_legs_set =
+     networkstatus_get_param(ns, "cfx_max_legs_set",
+                             MAX_LEGS_SET_DEFAULT,
+diff --git a/src/core/or/conflux_params.h b/src/core/or/conflux_params.h
+index 012eaa3..ab14dfa 100644
+--- a/src/core/or/conflux_params.h
++++ b/src/core/or/conflux_params.h
+@@ -17,6 +17,7 @@ uint8_t conflux_params_get_max_prebuilt(void);
+ uint8_t conflux_params_get_max_unlinked_leg_retry(void);
+ uint8_t conflux_params_get_num_legs_set(void);
+ uint8_t conflux_params_get_max_legs_set(void);
++void conflux_params_set_num_legs(uint8_t n);
+ uint8_t conflux_params_get_drain_pct(void);
+ uint8_t conflux_params_get_send_pct(void);
+ uint32_t conflux_params_get_max_oooq(void);
+diff --git a/src/feature/control/control_cmd.c b/src/feature/control/control_cmd.c
+index 2b44561..a522b0e 100644
+--- a/src/feature/control/control_cmd.c
++++ b/src/feature/control/control_cmd.c
+@@ -19,6 +19,10 @@
+ #include "core/or/circuitbuild.h"
+ #include "core/or/circuitlist.h"
+ #include "core/or/circuituse.h"
++#include "core/or/conflux.h"
++#include "core/or/conflux_params.h"
++#include "core/or/conflux_pool.h"
++#include "core/or/conflux_util.h"
+ #include "core/or/connection_edge.h"
+ #include "core/or/circuitstats.h"
+ #include "core/or/extendinfo.h"
+@@ -41,8 +45,10 @@
+ #include "feature/rend/rendcommon.h"
+ #include "lib/crypt_ops/crypto_rand.h"
+ #include "lib/crypt_ops/crypto_util.h"
++#include "lib/encoding/binascii.h"
+ #include "lib/encoding/confline.h"
+ #include "lib/encoding/kvline.h"
++#include "lib/string/scanf.h"
+ 
+ #include "core/or/cpath_build_state_st.h"
+ #include "core/or/entry_connection_st.h"
+@@ -1429,6 +1435,125 @@ handle_control_droptimeouts(control_connection_t *conn,
+   return 0;
+ }
+ 
++static const control_cmd_syntax_t conflux_syntax = {
++  .min_args = 1,
++  .max_args = 2,
++};
++
++/** Implementation for the CONFLUX command.
++ *
++ * The CONFLUX command interacts with the conflux multipath subsystem. It
++ * takes one of the following subcommands:
++ *
++ *   CONFLUX QUERY
++ *      Print one line for every leg circuit of every conflux set, using the
++ *      same (truncated) set id as the CONFLUX_ID= field of circuit-status.
++ *
++ *   CONFLUX ADD <set-id>
++ *      Launch a new leg for the conflux set identified by <set-id>, which is
++ *      the CONFLUX_ID printed by circuit-status and CONFLUX QUERY.
++ *
++ *   CONFLUX SET <n>
++ *      Override the number of legs the client builds per conflux set.
++ */
++static int
++handle_control_conflux(control_connection_t *conn,
++                       const control_cmd_args_t *args)
++{
++  const char *cmd = smartlist_get(args->args, 0);
++
++  if (!strcasecmp(cmd, "QUERY")) {
++    if (smartlist_len(args->args) != 1) {
++      control_write_endreply(conn, 512, "CONFLUX QUERY takes no arguments");
++      return 0;
++    }
++    smartlist_t *reply = smartlist_new();
++    SMARTLIST_FOREACH_BEGIN(circuit_get_global_list(), circuit_t *, circ_) {
++      const uint8_t *nonce;
++      if (!CIRCUIT_IS_ORIGIN(circ_) || circ_->marked_for_close)
++        continue;
++      origin_circuit_t *circ = TO_ORIGIN_CIRCUIT(circ_);
++      if (!(circ->base_.conflux || circ->base_.conflux_pending_nonce))
++        continue;
++      nonce = conflux_get_nonce(&circ->base_);
++      tor_assert(nonce);
++      if (circ->base_.conflux) {
++        const conflux_t *cfx = circ->base_.conflux;
++        smartlist_add_asprintf(reply,
++            "SET=%s CIRC=%lu LEGS=%u STATE=LINKED RTT_US=%" PRIu64,
++            hex_str((const char *)nonce, DIGEST256_LEN/2),
++            (unsigned long)circ->global_identifier,
++            CONFLUX_NUM_LEGS(cfx),
++            conflux_get_circ_rtt(&circ->base_));
++      } else {
++        smartlist_add_asprintf(reply, "SET=%s CIRC=%lu STATE=UNLINKED",
++            hex_str((const char *)nonce, DIGEST256_LEN/2),
++            (unsigned long)circ->global_identifier);
++      }
++    } SMARTLIST_FOREACH_END(circ_);
++
++    if (smartlist_len(reply) == 0)
++      smartlist_add_strdup(reply, "(no conflux sets)");
++
++    control_printf_midreply(conn, 250, "CONFLUX status");
++    SMARTLIST_FOREACH(reply, char *, cp, control_printf_midreply(conn, 250,
++                                                                "%s", cp));
++    control_write_endreply(conn, 250, "OK");
++    SMARTLIST_FOREACH(reply, char *, cp, tor_free(cp));
++    smartlist_free(reply);
++  } else if (!strcasecmp(cmd, "ADD")) {
++    if (smartlist_len(args->args) != 2) {
++      control_write_endreply(conn, 512, "CONFLUX ADD requires a set id");
++      return 0;
++    }
++    const char *id = smartlist_get(args->args, 1);
++    const uint8_t *nonce = NULL;
++    SMARTLIST_FOREACH_BEGIN(circuit_get_global_list(), circuit_t *, circ_) {
++      if (!CIRCUIT_IS_ORIGIN(circ_) || circ_->marked_for_close)
++        continue;
++      if (!(circ_->conflux || circ_->conflux_pending_nonce))
++        continue;
++      const uint8_t *cand_nonce = conflux_get_nonce(circ_);
++      tor_assert(cand_nonce);
++      if (!strcasecmp(hex_str((const char *)cand_nonce, DIGEST256_LEN/2),
++                      id)) {
++        nonce = cand_nonce;
++        break;
++      }
++    } SMARTLIST_FOREACH_END(circ_);
++
++    if (!nonce) {
++      control_printf_endreply(conn, 552, "No such conflux set \"%s\"", id);
++      return 0;
++    }
++    if (!conflux_launch_leg(nonce)) {
++      control_write_endreply(conn, 551, "Couldn't start conflux leg");
++      return 0;
++    }
++    send_control_done(conn);
++  } else if (!strcasecmp(cmd, "SET")) {
++    if (smartlist_len(args->args) != 2) {
++      control_write_endreply(conn, 512, "CONFLUX SET requires a leg count");
++      return 0;
++    }
++    const char *n_str = smartlist_get(args->args, 1);
++    int n = -1;
++    if (tor_sscanf(n_str, "%d", &n) != 1 ||
++        n < 1 || n > conflux_params_get_max_legs_set()) {
++      control_printf_endreply(conn, 512, "Invalid number of legs \"%s\"",
++                              n_str);
++      return 0;
++    }
++    conflux_params_set_num_legs((uint8_t)n);
++    send_control_done(conn);
++  } else {
++    control_printf_endreply(conn, 512,
++                            "Unrecognized CONFLUX subcommand \"%s\"", cmd);
++    return 0;
++  }
++  return 0;
++}
++
+ static const char *hsfetch_keywords[] = {
+   "SERVER", NULL,
+ };
+@@ -2191,6 +2316,7 @@ static const control_cmd_def_t CONTROL_COMMANDS[] =
+   ONE_LINE(authchallenge, CMD_FL_WIPE),
+   ONE_LINE(dropguards, 0),
+   ONE_LINE(droptimeouts, 0),
++  ONE_LINE(conflux, 0),
+   ONE_LINE(hsfetch, 0),
+   MULTLINE(hspost, 0),
+   ONE_LINE(add_onion, CMD_FL_WIPE),
+-- 
+2.53.0.windows.1
+

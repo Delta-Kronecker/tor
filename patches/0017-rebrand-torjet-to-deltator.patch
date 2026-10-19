@@ -1,0 +1,402 @@
+From 4fc8c8148ab4f4f3f1ed822b2c598a982358569a Mon Sep 17 00:00:00 2001
+From: Delta-Kronecker <220442677+Delta-Kronecker@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 11:43:59 +0330
+Subject: [PATCH] Rename project to DeltaTor, update icon
+
+Full rebrand TorJet -> DeltaTor across the Windows launcher:
+- rename TorJetUi.cs -> DeltaTorUi.cs, TorJet.ico -> DeltaTor.ico,
+  TORJET-CHANGES.md -> DELTATOR-CHANGES.md
+- replace all TorJet/TORJET/torjet references in launcher, tor-src
+  (incl. US)\n usernames, docs, CI and configs with DeltaTor
+- keep-alive SOCKS5 username now deltator-keepalive (C + C# in sync)
+- embed new multi-size icon from the user's PNG export (make-icon)
+- bump bench harness release default to v2.0.0
+---
+ ...{TORJET-CHANGES.md => DELTATOR-CHANGES.md} | 10 +++----
+ tor-src/doc/man/tor.1.txt                     | 14 ++++-----
+ tor-src/src/app/config/or_options_st.h        | 12 ++++----
+ tor-src/src/core/or/circuituse.c              |  6 ++--
+ tor-src/src/core/or/conflux_params.c          | 12 ++++----
+ tor-src/src/core/or/conflux_params.h          |  2 +-
+ tor-src/src/core/or/conflux_pool.c            | 30 +++++++++----------
+ tor-src/src/core/or/conflux_st.h              |  4 +--
+ 8 files changed, 45 insertions(+), 45 deletions(-)
+ rename tor-src/doc/{TORJET-CHANGES.md => DELTATOR-CHANGES.md} (89%)
+
+diff --git a/doc/TORJET-CHANGES.md b/doc/DELTATOR-CHANGES.md
+similarity index 89%
+rename from doc/TORJET-CHANGES.md
+rename to doc/DELTATOR-CHANGES.md
+index 2518d57..02efed9 100644
+--- a/doc/TORJET-CHANGES.md
++++ b/doc/DELTATOR-CHANGES.md
+@@ -1,8 +1,8 @@
+-# TorJet modifications to tor 0.4.9.11
++# DeltaTor modifications to tor 0.4.9.11
+ 
+-This tree is the official tor 0.4.9.11 release source plus the TorJet
++This tree is the official tor 0.4.9.11 release source plus the DeltaTor
+ conflux extensions listed below. Everything else is untouched upstream
+-code, so this file is the single place documenting where TorJet deviates.
++code, so this file is the single place documenting where DeltaTor deviates.
+ 
+ ## New torrc options (client side)
+ 
+@@ -38,7 +38,7 @@ CLOSECIRCUIT to prune weak ones.
+ 
+ ## Keep-alive spread
+ 
+-Streams whose SOCKS5 auth username equals `torjet-keepalive` bypass the
++Streams whose SOCKS5 auth username equals `deltator-keepalive` bypass the
+ RTT-based set filters (`ConfluxSetRttMax`/`ConfluxSetRttPct`) and are sent
+ to the set with the fewest cumulative streams, so keep-alive traffic keeps
+ exercising every set regardless of the user's selection policy.
+@@ -55,7 +55,7 @@ New fields on `conflux_t` (`src/core/or/conflux_st.h`): `total_streams`,
+ ## Launch-budget refund for deliberate closes
+ 
+ Upstream counts every leg launch against a per-set budget
+-(`num_leg_launch`) so failing builds cannot churn forever. TorJet refunds
++(`num_leg_launch`) so failing builds cannot churn forever. DeltaTor refunds
+ one slot in `cfx_del_leg()` **only** when a healthy linked leg was closed
+ deliberately (no in-flight data, sequence numbers intact, not the current
+ leg). Genuine teardowns keep their slot consumed — the set dies anyway and
+diff --git a/doc/man/tor.1.txt b/doc/man/tor.1.txt
+index 7fe6133..b1cc243 100644
+--- a/doc/man/tor.1.txt
++++ b/doc/man/tor.1.txt
+@@ -371,40 +371,40 @@ forward slash (/) in the configuration file and on the command line.
+     only use the circuit with lower latency for all data. The lowmem versions
+     minimize queue usage memory at the client. (Default: "throughput")
+ 
+-// TorJet client extensions --------------------------------------------------
++// DeltaTor client extensions --------------------------------------------------
+ 
+ [[ConfluxNumSets]] **ConfluxNumSets** __NUM__::
+-    TorJet extension: override how many conflux sets (exit paths) the client
++    DeltaTor extension: override how many conflux sets (exit paths) the client
+     keeps alive, replacing the consensus value of cfx_max_prebuilt_set and
+     cfx_max_linked_set. 0 uses the consensus default. Valid range: 0-32.
+     (Default: 0)
+ 
+ [[ConfluxNumLegs]] **ConfluxNumLegs** __NUM__::
+-    TorJet extension: override the number of legs (circuits) built per conflux
++    DeltaTor extension: override the number of legs (circuits) built per conflux
+     set, replacing the consensus value of cfx_num_legs_set. More legs mean
+     more parallel bandwidth per set. 0 uses the consensus default. Valid
+     range: 0-16. (Default: 0)
+ 
+ [[ConfluxNumLinkedSets]] **ConfluxNumLinkedSets** __NUM__::
+-    TorJet extension: ceiling on the number of *linked* conflux sets. Only
++    DeltaTor extension: ceiling on the number of *linked* conflux sets. Only
+     binds when set below ConfluxNumSets; equal values keep exactly that many
+     sets linked. 0 uses the consensus default. Valid range: 0-32.
+     (Default: 0)
+ 
+ [[ConfluxSetSelection]] **ConfluxSetSelection** __NUM__::
+-    TorJet extension: policy used when attaching a new stream to a conflux
++    DeltaTor extension: policy used when attaching a new stream to a conflux
+     set. 0 = first acceptable set, 1 = round-robin across sets,
+     2 = set with fewest streams, 3 = set with lowest best-leg RTT.
+     (Default: 1)
+ 
+ [[ConfluxSetRttMax]] **ConfluxSetRttMax** __NUM__::
+-    TorJet extension: slow-set failover. When attaching a new stream, sets
++    DeltaTor extension: slow-set failover. When attaching a new stream, sets
+     whose best-leg RTT is at or above this many milliseconds are skipped,
+     unless every set is slow (a stream is never left unattached). 0 disables
+     the filter. Must be >= 0. (Default: 0)
+ 
+ [[ConfluxSetRttPct]] **ConfluxSetRttPct** __NUM__::
+-    TorJet extension: when attaching a new stream, restrict candidates to the
++    DeltaTor extension: when attaching a new stream, restrict candidates to the
+     best (lowest best-leg RTT) this-many percent of sets; always keeps at
+     least one set. Applied after ConfluxSetRttMax. 0 disables the filter.
+     Valid range: 0-100. (Default: 0)
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index afd1e6e..50295a4 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -756,33 +756,33 @@ struct or_options_t {
+   /** Number of legs to build per conflux set. 0 (default) means "use the
+    * consensus default" (cfx_num_legs, usually 2); any positive value overrides
+    * it so every set is always kept at exactly this many legs. This is a
+-   * TorJet extension. */
++   * DeltaTor extension. */
+    int ConfluxNumLegs;
+ 
+-  /** TorJet extension: target number of conflux sets to prebuild/keep. 0 means
++  /** DeltaTor extension: target number of conflux sets to prebuild/keep. 0 means
+    * "use the consensus default" (cfx_max_prebuilt_set, usually 3); any positive
+    * value overrides the prebuilt-set target. */
+   int ConfluxNumSets;
+ 
+-  /** TorJet extension: hard cap on the number of linked conflux sets tor may
++  /** DeltaTor extension: hard cap on the number of linked conflux sets tor may
+    * keep at once. 0 means "use the consensus default" (cfx_max_linked_set,
+    * usually 10); any positive value overrides it. Setting it equal to
+    * ConfluxNumSets keeps exactly that many sets alive even while some are in
+    * use; a larger value allows extra sets on top so that many stay ready. */
+   int ConfluxNumLinkedSets;
+ 
+-  /** TorJet extension: how to pick the conflux set a new stream is attached
++  /** DeltaTor extension: how to pick the conflux set a new stream is attached
+    * to. 0 = first acceptable (stock behavior), 1 = round-robin across the
+    * acceptable sets, 2 = the set with the fewest attached streams,
+    * 3 = the set with the lowest best-leg RTT. */
+   int ConfluxSetSelection;
+ 
+-  /** TorJet extension: skip a conflux set when choosing one for a new stream
++  /** DeltaTor extension: skip a conflux set when choosing one for a new stream
+    * if its best-leg RTT is at/above this many milliseconds. 0 (default) disables
+    * the health filter so every acceptable set is a candidate. */
+   int ConfluxSetRttMax;
+ 
+-  /** TorJet extension: when choosing a set for a new stream, only keep the
++  /** DeltaTor extension: when choosing a set for a new stream, only keep the
+    * best RTT_PCT% of candidate sets (those with the lowest best-leg RTT) and
+    * let the selection policy pick among them. 0 (default) disables the
+    * percentage filter. Applied after ConfluxSetRttMax when both are set, and
+diff --git a/src/core/or/circuituse.c b/src/core/or/circuituse.c
+index a60eb89..3daee47 100644
+--- a/src/core/or/circuituse.c
++++ b/src/core/or/circuituse.c
+@@ -2645,7 +2645,7 @@ link_apconn_to_circ(entry_connection_t *apconn, origin_circuit_t *circ,
+   circ->p_streams = ENTRY_TO_EDGE_CONN(apconn);
+   conflux_update_p_streams(circ, ENTRY_TO_EDGE_CONN(apconn));
+ 
+-  /* TorJet: count the stream against its conflux set, if any. */
++  /* DeltaTor: count the stream against its conflux set, if any. */
+   conflux_t *stream_cfx = TO_CIRCUIT(circ)->conflux;
+   if (stream_cfx) {
+     stream_cfx->total_streams++;
+@@ -3219,7 +3219,7 @@ circuit_sent_valid_data(origin_circuit_t *circ, uint16_t relay_body_len)
+       tor_add_u32_nowrap(circ->n_overhead_written_circ_bw,
+                          RELAY_PAYLOAD_SIZE_MAX-relay_body_len);
+ 
+-  /* TorJet: accumulate against the conflux set, if any. */
++  /* DeltaTor: accumulate against the conflux set, if any. */
+   conflux_t *cfx = TO_CIRCUIT(circ)->conflux;
+   if (cfx) {
+     cfx->bytes_sent += relay_body_len;
+@@ -3245,7 +3245,7 @@ circuit_read_valid_data(origin_circuit_t *circ, uint16_t relay_body_len)
+       tor_add_u32_nowrap(circ->n_overhead_read_circ_bw,
+                          RELAY_PAYLOAD_SIZE_MAX-relay_body_len);
+ 
+-  /* TorJet: accumulate against the conflux set, if any. */
++  /* DeltaTor: accumulate against the conflux set, if any. */
+   conflux_t *cfx = TO_CIRCUIT(circ)->conflux;
+   if (cfx) {
+     cfx->bytes_recv += relay_body_len;
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index c87c42c..6e3d079 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -239,7 +239,7 @@ conflux_params_get_num_legs_set(void)
+   return num_legs_set;
+ }
+ 
+-/** TorJet extension: override the number of legs per set at runtime
++/** DeltaTor extension: override the number of legs per set at runtime
+  * (e.g. from the CONFLUX SET control command). Ignored if out of range. */
+ void
+ conflux_params_set_num_legs(uint8_t n)
+@@ -249,7 +249,7 @@ conflux_params_set_num_legs(uint8_t n)
+   }
+ }
+ 
+-/** TorJet extension: return the set-selection policy for new streams.
++/** DeltaTor extension: return the set-selection policy for new streams.
+  * 0 = first acceptable, 1 = round-robin, 2 = least-streams, 3 = fastest. */
+ int
+ conflux_params_get_set_selection(void)
+@@ -261,7 +261,7 @@ conflux_params_get_set_selection(void)
+   return 0;
+ }
+ 
+-/** TorJet extension: return the slow-set RTT filter in milliseconds. 0 means
++/** DeltaTor extension: return the slow-set RTT filter in milliseconds. 0 means
+  * no filter (every acceptable set is a candidate). */
+ int
+ conflux_params_get_set_rtt_max(void)
+@@ -273,7 +273,7 @@ conflux_params_get_set_rtt_max(void)
+   return 0;
+ }
+ 
+-/** TorJet extension: return the "best sets" percentage filter. 0 means no
++/** DeltaTor extension: return the "best sets" percentage filter. 0 means no
+  * percentage filter; > 0 keeps only that percent of candidate sets with the
+  * lowest best-leg RTT before the selection policy runs. */
+ int
+@@ -352,7 +352,7 @@ conflux_params_new_consensus(const networkstatus_t *ns)
+                             NUM_LEGS_SET_DEFAULT,
+                             NUM_LEGS_SET_MIN, NUM_LEGS_SET_MAX);
+ 
+-  /* TorJet extension: the torrc ConfluxNumLegs option (0 = consensus default)
++  /* DeltaTor extension: the torrc ConfluxNumLegs option (0 = consensus default)
+    * overrides the consensus cfx_num_legs_set, so every set is always kept at
+    * exactly that many legs. */
+   {
+@@ -367,7 +367,7 @@ conflux_params_new_consensus(const networkstatus_t *ns)
+                             MAX_LEGS_SET_DEFAULT,
+                             MAX_LEGS_SET_MIN, MAX_LEGS_SET_MAX);
+ 
+-  /* TorJet extension: the torrc ConfluxNumSets / ConfluxNumLinkedSets options
++  /* DeltaTor extension: the torrc ConfluxNumSets / ConfluxNumLinkedSets options
+    * (0 = consensus default) override the consensus cfx_max_prebuilt_set /
+    * cfx_max_linked_set values. ConfluxNumSets is the number of sets kept alive
+    * (the pool in conflux_predict_new bounds the total, linked + unlinked, at
+diff --git a/src/core/or/conflux_params.h b/src/core/or/conflux_params.h
+index 0c9e78e..768a6f1 100644
+--- a/src/core/or/conflux_params.h
++++ b/src/core/or/conflux_params.h
+@@ -11,7 +11,7 @@
+ 
+ #include "core/or/or.h"
+ 
+-/** TorJet extension: conflux set-selection policies (ConfluxSetSelection). */
++/** DeltaTor extension: conflux set-selection policies (ConfluxSetSelection). */
+ typedef enum conflux_set_select_t {
+   CONFLUX_SET_SELECT_FIRST = 0,
+   CONFLUX_SET_SELECT_ROUND_ROBIN = 1,
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index 11b91e9..bc75992 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -605,7 +605,7 @@ cfx_del_leg(conflux_t *cfx, const circuit_t *circ)
+     cfx->prev_leg = NULL;
+   }
+ 
+-  /* TorJet: refund one launch-budget slot ONLY when a healthy linked leg was
++  /* DeltaTor: refund one launch-budget slot ONLY when a healthy linked leg was
+    * closed on purpose (e.g. by the launcher's quality monitor). This lets tor
+    * keep refilling the set toward its target leg count for the whole session
+    * without permanently exhausting the per-set retry cap. A genuine teardown
+@@ -1410,7 +1410,7 @@ conflux_predict_new(time_t now)
+   }
+ }
+ 
+-/** TorJet extension: candidate set gathered while choosing where to attach a
++/** DeltaTor extension: candidate set gathered while choosing where to attach a
+  * new stream. */
+ typedef struct conflux_set_candidate_t {
+   origin_circuit_t *ocirc;
+@@ -1422,7 +1422,7 @@ typedef struct conflux_set_candidate_t {
+   uint64_t total_streams;
+ } conflux_set_candidate_t;
+ 
+-/** TorJet extension: return the best (lowest) valid leg RTT in usec for the
++/** DeltaTor extension: return the best (lowest) valid leg RTT in usec for the
+  * set, or UINT64_MAX if no leg has a measured RTT yet. */
+ static uint64_t
+ conflux_set_best_rtt(const conflux_t *cfx)
+@@ -1437,7 +1437,7 @@ conflux_set_best_rtt(const conflux_t *cfx)
+   return best;
+ }
+ 
+-/** TorJet extension: comparator for sorting set candidates by best-leg RTT
++/** DeltaTor extension: comparator for sorting set candidates by best-leg RTT
+  * ascending (lowest RTT first). Sets without a measured RTT sort last so the
+  * percentage filter never starves known-good sets. */
+ static int
+@@ -1456,7 +1456,7 @@ conflux_cand_rtt_asc_cmp(const void **a, const void **b)
+   return 0;
+ }
+ 
+-/** Torjet extension: count the streams currently attached to the set. The
++/** DeltaTor extension: count the streams currently attached to the set. The
+  * stream list head (p_streams) is mirrored on every leg, so inspecting the
+  * first leg is enough. */
+ static size_t
+@@ -1475,14 +1475,14 @@ conflux_set_stream_count(const conflux_t *cfx)
+   return count;
+ }
+ 
+-/** TorJet extension: SOCKS5 username used by TorJet's keep-alive streams. They
++/** DeltaTor extension: SOCKS5 username used by DeltaTor's keep-alive streams. They
+  * arrive on the dedicated keep-alive SocksPort (9052, NoIsolateSOCKSAuth so the
+  * marker does not isolate them off the shared circuits) and must always reach
+  * every set, so they bypass the RTT-based set filters and are spread
+  * round-robin regardless of the configured ConfluxSetSelection policy. */
+-#define CONFLUX_KEEPALIVE_USERNAME "torjet-keepalive"
++#define CONFLUX_KEEPALIVE_USERNAME "deltator-keepalive"
+ 
+-/** Return true iff the given connection is one of TorJet's keep-alive streams,
++/** Return true iff the given connection is one of DeltaTor's keep-alive streams,
+  * identified by its SOCKS5 auth username. */
+ static bool
+ conflux_conn_is_keepalive(const entry_connection_t *conn)
+@@ -1496,8 +1496,8 @@ conflux_conn_is_keepalive(const entry_connection_t *conn)
+          !strncmp(socks->username, CONFLUX_KEEPALIVE_USERNAME, len);
+ }
+ 
+-/** Torjet extension: pick the set to attach a new stream to, honoring the
+- * configured selection policy. If keepalive_balance is true (TorJet keep-alive
++/** DeltaTor extension: pick the set to attach a new stream to, honoring the
++ * configured selection policy. If keepalive_balance is true (DeltaTor keep-alive
+  * streams), pick the set with the fewest cumulative streams: a stable,
+  * self-balancing rotation that keeps keep-alive pings spread evenly across
+  * every set even while sets are being rebuilt and drop in and out of the
+@@ -1561,7 +1561,7 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance)
+  * conflux circuits are excluded by circuit_is_acceptable(). At present,
+  * conflux circuits in this pool are non-internal.
+  *
+- * TorJet extension: instead of always returning the first acceptable set, we
++ * DeltaTor extension: instead of always returning the first acceptable set, we
+  * gather every acceptable set and let the configured policy (ConfluxSetSelection)
+  * pick one, so new streams are spread across the linked sets (load-balancing)
+  * and slow sets can be skipped for failover when ConfluxSetRttMax is set.
+@@ -1612,7 +1612,7 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+     smartlist_add(cands, cand);
+   } DIGEST256MAP_FOREACH_END;
+ 
+-  /* TorJet: keep-alive streams bypass the RTT-based set filters (ConfluxSetRttMax
++  /* DeltaTor: keep-alive streams bypass the RTT-based set filters (ConfluxSetRttMax
+    * and ConfluxSetRttPct) and are spread evenly across every acceptable set
+    * (picking the least-loaded one), so keep-alive traffic keeps exercising all
+    * sets no matter what the user's selection policy and filters are. */
+@@ -1633,7 +1633,7 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+     } SMARTLIST_FOREACH_END(c);
+   }
+ 
+-  /* TorJet: optionally prune the candidate list down to the best RTT_PCT% of
++  /* DeltaTor: optionally prune the candidate list down to the best RTT_PCT% of
+    * sets (lowest best-leg RTT) before the selection policy runs. Like the
+    * absolute threshold, this never empties the list: at least one set is kept
+    * so a new stream can always attach somewhere. */
+@@ -1852,13 +1852,13 @@ linked_circuit_closed(circuit_t *circ)
+     conflux_mark_all_for_close(nonce, is_client, END_CIRC_REASON_FINISHED);
+   }
+ 
+-  /* TorJet: if a linked leg was closed while the set survived (e.g. by the
++  /* DeltaTor: if a linked leg was closed while the set survived (e.g. by the
+    * launcher's quality monitor), launch a replacement so the set can refill
+    * toward its target leg count. The budget refund in cfx_del_leg() keeps
+    * this sustainable for long sessions. Mirrors the unlinked recovery logic
+    * in unlinked_circuit_closed().
+    *
+-   * TorJet: the same applies when the closed leg was the last one of the set,
++   * DeltaTor: the same applies when the closed leg was the last one of the set,
+    * so the set was removed from the linked pool above. A genuine teardown is
+    * told apart from a deliberate close (such as the launcher removing a weak
+    * sole leg) by in_full_teardown: conflux_mark_all_for_close() only sets it
+diff --git a/src/core/or/conflux_st.h b/src/core/or/conflux_st.h
+index 09ce0a9..9538d97 100644
+--- a/src/core/or/conflux_st.h
++++ b/src/core/or/conflux_st.h
+@@ -138,11 +138,11 @@ struct conflux_t {
+    * because there is a maximum allowed in order to avoid side channel(s). */
+   unsigned int num_leg_launch;
+ 
+-  /** TorJet: cumulative number of streams that have been attached to this set
++  /** DeltaTor: cumulative number of streams that have been attached to this set
+    * since it was created. */
+   uint64_t total_streams;
+ 
+-  /** TorJet: cumulative payload bytes sent and received by all legs of this
++  /** DeltaTor: cumulative payload bytes sent and received by all legs of this
+    * set since it was created. */
+   uint64_t bytes_sent;
+   uint64_t bytes_recv;
+-- 
+2.53.0.windows.1
+

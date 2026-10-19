@@ -1,0 +1,106 @@
+From 569ea66a5c2c374dbe1a1ea9a6cc86f615582d5b Mon Sep 17 00:00:00 2001
+From: Delta-Kronecker <your-email@example.com>
+Date: Wed, 12 Aug 2026 14:27:57 +0330
+Subject: [PATCH] tor+launcher: configurable conflux prebuilt and linked-set
+ caps
+
+Add the ConfluxNumLinkedSets torrc option so the hard cap on linked
+conflux sets is separately configurable from the prebuilt-set target
+(ConfluxNumSets). Without it, tor keeps building extra sets on top of
+in-use ones up to the consensus cfx_max_linked_set (10), so setting
+ConfluxNumSets=8 could still yield 9-10 sets.
+
+- tor: ConfluxNumSets now caps max_linked_set at exactly its value when
+  no separate cap is set; ConfluxNumLinkedSets overrides max_linked_set.
+- launcher: settings submenu item 5, persisted to data\conflux-linked-sets.txt,
+  written to torrc as ConfluxNumLinkedSets.
+- docs: describe the conflux topology settings in README.
+---
+ tor-src/src/app/config/config.c        |  5 +++++
+ tor-src/src/app/config/or_options_st.h | 12 +++++++++---
+ tor-src/src/core/or/conflux_params.c   | 16 ++++++++++------
+ 3 files changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index 755affc..d3805a7 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -386,6 +386,7 @@ static const config_var_t option_vars_[] = {
+           "throughput"),
+   V(ConfluxNumLegs,              INT,      "0"),
+   V(ConfluxNumSets,              INT,      "0"),
++  V(ConfluxNumLinkedSets,        INT,      "0"),
+   V(ConnLimit,                   POSINT,     "1000"),
+   V(ConnDirectionStatistics,     BOOL,     "0"),
+   V(ConstrainedSockets,          BOOL,     "0"),
+@@ -3596,6 +3597,10 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+     REJECT("ConfluxNumSets must be between 0 (consensus default) and 32");
+   }
+ 
++  if (options->ConfluxNumLinkedSets < 0 || options->ConfluxNumLinkedSets > 32) {
++    REJECT("ConfluxNumLinkedSets must be between 0 (consensus default) and 32");
++  }
++
+   if (options_validate_publish_server(old_options, options, msg) < 0)
+     return -1;
+ 
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index 416d6c7..7a74530 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -759,12 +759,18 @@ struct or_options_t {
+    * TorJet extension. */
+    int ConfluxNumLegs;
+ 
+-  /** TorJet extension: target number of conflux sets to keep alive. 0 means
++  /** TorJet extension: target number of conflux sets to prebuild/keep. 0 means
+    * "use the consensus default" (cfx_max_prebuilt_set, usually 3); any positive
+-   * value overrides the prebuilt-set target and raises the linked-set cap to at
+-   * least this many, so that many sets can coexist. */
++   * value overrides the prebuilt-set target. */
+   int ConfluxNumSets;
+ 
++  /** TorJet extension: hard cap on the number of linked conflux sets tor may
++   * keep at once. 0 means "use the consensus default" (cfx_max_linked_set,
++   * usually 10); any positive value overrides it. Setting it equal to
++   * ConfluxNumSets keeps exactly that many sets alive even while some are in
++   * use; a larger value allows extra sets on top so that many stay ready. */
++  int ConfluxNumLinkedSets;
++
+   /** The length of time that we think a consensus should be fresh. */
+   int V3AuthVotingInterval;
+   /** The length of time we think it will take to distribute votes. */
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index cf6b322..ffbbcf4 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -330,16 +330,20 @@ conflux_params_new_consensus(const networkstatus_t *ns)
+                             MAX_LEGS_SET_DEFAULT,
+                             MAX_LEGS_SET_MIN, MAX_LEGS_SET_MAX);
+ 
+-  /* TorJet extension: the torrc ConfluxNumSets option (0 = consensus default)
+-   * overrides the consensus cfx_max_prebuilt_set target and raises the linked
+-   * set cap to at least that many, so ConfluxNumSets sets can coexist. */
++  /* TorJet extension: the torrc ConfluxNumSets / ConfluxNumLinkedSets options
++   * (0 = consensus default) override the consensus cfx_max_prebuilt_set /
++   * cfx_max_linked_set values, so the user controls how many sets are prebuilt
++   * and the hard cap on linked sets. When only ConfluxNumSets is set, the
++   * linked-set cap defaults to exactly that many so no extra sets are built on
++   * top of sets that are currently in use. */
+   {
+     const or_options_t *opts = get_options();
+     if (opts && opts->ConfluxNumSets > 0) {
+       max_prebuilt_set = opts->ConfluxNumSets;
+-      if (max_linked_set < opts->ConfluxNumSets) {
+-        max_linked_set = opts->ConfluxNumSets;
+-      }
++      max_linked_set = opts->ConfluxNumSets;
++    }
++    if (opts && opts->ConfluxNumLinkedSets > 0) {
++      max_linked_set = opts->ConfluxNumLinkedSets;
+     }
+   }
+ 
+-- 
+2.53.0.windows.1
+

@@ -1,0 +1,25 @@
+From aa37e60f6cde03332ffd8d63e860e168fbf75aa6 Mon Sep 17 00:00:00 2001
+From: Delta-Kronecker <your-email@example.com>
+Date: Tue, 11 Aug 2026 23:16:05 +0330
+Subject: [PATCH] tor: include crypt_path_st.h in control_cmd.c to fix CONFLUX
+ build
+
+---
+ tor-src/src/feature/control/control_cmd.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/feature/control/control_cmd.c b/src/feature/control/control_cmd.c
+index 1dc41d3..8b63081 100644
+--- a/src/feature/control/control_cmd.c
++++ b/src/feature/control/control_cmd.c
+@@ -51,6 +51,7 @@
+ #include "lib/string/scanf.h"
+ 
+ #include "core/or/cpath_build_state_st.h"
++#include "core/or/crypt_path_st.h"
+ #include "core/or/entry_connection_st.h"
+ #include "core/or/origin_circuit_st.h"
+ #include "core/or/socks_request_st.h"
+-- 
+2.53.0.windows.1
+

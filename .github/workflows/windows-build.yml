@@ -31,6 +31,7 @@ jobs:
             rm -rf "$DEST"
           fi
           git clone "$REPO_URL" "$DEST"
+          git -C "$DEST" checkout tor-0.4.9.11
           echo "cloned into: $DEST"
           git -C "$DEST" log --oneline -1
 
