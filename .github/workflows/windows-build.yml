@@ -37,9 +37,13 @@ jobs:
       - name: Apply fork patches
         run: |
           cd tor-src
+          tr -d '\r' < src/app/config/config.c > .config.c.lf
+          mv .config.c.lf src/app/config/config.c
           for p in ../patches/*.patch; do
             echo "== $p"
-            git apply --verbose "$p"
+            tr -d '\r' < "$p" > .patch.lf
+            git apply --verbose .patch.lf
+            rm -f .patch.lf
           done
 
       - name: Configure and build
