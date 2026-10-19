@@ -19,7 +19,7 @@ jobs:
           msystem: MINGW64
           update: true
           install: >-
-            git autoconf automake libtool m4 make patch zip curl
+            git autoconf automake libtool m4 make patch zip
           pacboy: >-
             gcc:p pkgconf:p libevent:p openssl:p zlib:p xz:p zstd:p
 
@@ -70,8 +70,8 @@ jobs:
           ldd build/src/app/tor.exe | awk '/mingw64/ {print $3}' | sort -u | while read -r dll; do
             [ -f "$dll" ] && cp "$dll" dist/
           done
-          curl -fL --retry 3 https://dist.torproject.org/geoip -o dist/data/geoip
-          curl -fL --retry 3 https://dist.torproject.org/geoipv6 -o dist/data/geoipv6
+          cp tor-src/src/config/geoip dist/data/geoip
+          cp tor-src/src/config/geoip6 dist/data/geoipv6
           (cd dist && zip -9 -r ../tor-windows-x86_64.zip .)
           ./dist/tor.exe --version
 
