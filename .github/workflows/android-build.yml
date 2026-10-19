@@ -106,6 +106,10 @@ jobs:
           cd "$GITHUB_WORKSPACE/build-android"
           export PATH="$TOOLCHAIN/bin:$PATH"
           CC=${{ matrix.clang }} \
+          AR=llvm-ar \
+          RANLIB=llvm-ranlib \
+          STRIP=llvm-strip \
+          NM=llvm-nm \
           ../tor-src/configure \
             --host=${{ matrix.triple }} \
             --build="$(../tor-src/config.guess)" \
@@ -116,6 +120,7 @@ jobs:
             --disable-man \
             --disable-html-docs \
             --disable-unittests \
+            --disable-tool-name-check \
             CPPFLAGS="-I$DEPS/include" \
             LDFLAGS="-L$DEPS/lib -L$DEPS/lib64"
           make -j"$(nproc)"
