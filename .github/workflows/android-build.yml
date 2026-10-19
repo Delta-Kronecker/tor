@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 defaults:
   run:
     shell: bash
@@ -151,3 +154,11 @@ jobs:
         with:
           name: android-config-log-${{ matrix.abi }}
           path: build-android/config.log
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          files: tor-android-${{ matrix.abi }}.zip
+          make_latest: true

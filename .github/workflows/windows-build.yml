@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 defaults:
   run:
     shell: msys2 {0}
@@ -88,3 +91,11 @@ jobs:
         with:
           name: config-log
           path: build/config.log
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          files: tor-windows-x86_64.zip
+          make_latest: true
