@@ -43,7 +43,6 @@ ConfluxEnabled 1
 ConfluxClientUX throughput
 
 SocksPort 127.0.0.1:9050
-SocksPort 127.0.0.1:9052
 
 CircuitsAvailableTimeout 4320
 CircuitStreamTimeout 10
