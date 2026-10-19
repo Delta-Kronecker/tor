@@ -1,0 +1,8 @@
+DataDirectory data
+KeyDirectory data/keys
+CacheDirectory data/cache
+PidFile data/tor.pid
+Log notice stdout
+Log notice file data/tor.log
+GeoIPFile data/geoip
+GeoIPv6File data/geoipv6

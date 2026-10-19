@@ -1,0 +1,140 @@
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index 53466f6..56338ee 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -3128,6 +3128,11 @@ static int
+ warn_if_option_path_is_relative(const char *option,
+                                 const char *filepath)
+ {
++#ifdef _WIN32
++  (void)option;
++  (void)filepath;
++  return 0;
++#else
+   if (filepath && path_is_relative(filepath)) {
+     char *abs_path = make_path_absolute(filepath);
+     COMPLAIN("Path for %s (%s) is relative and will resolve to %s."
+@@ -3136,6 +3141,7 @@ warn_if_option_path_is_relative(const char *option,
+     return 1;
+   }
+   return 0;
++#endif
+ }
+ 
+ /** Scan <b>options</b> for occurrences of relative file/directory
+@@ -4313,6 +4319,38 @@ get_windows_conf_root(void)
+   is_set = 1;
+   return path;
+ }
++
++static const char *
++get_exe_dir(void)
++{
++  static int is_set = 0;
++  static char path[MAX_PATH*2+1];
++  DWORD len;
++  char *slash;
++
++  if (is_set)
++    return path[0] ? path : NULL;
++  is_set = 1;
++  len = GetModuleFileNameA(NULL, path, sizeof(path));
++  if (len == 0 || len >= sizeof(path)) {
++    path[0] = '\0';
++    return NULL;
++  }
++  slash = strrchr(path, '\\');
++  if (slash)
++    *slash = '\0';
++  else
++    path[0] = '\0';
++  return path[0] ? path : NULL;
++}
++
++static void
++chdir_to_exe_dir(void)
++{
++  const char *dir = get_exe_dir();
++  if (dir)
++    SetCurrentDirectoryA(dir);
++}
+ #endif /* defined(_WIN32) */
+ 
+ /** Return the default location for our torrc file (if <b>defaults_file</b> is
+@@ -4324,15 +4362,16 @@ get_default_conf_file(int defaults_file)
+   (void) defaults_file;
+   return NULL;
+ #elif defined(_WIN32)
++  const char *root = get_exe_dir();
++  if (!root)
++    root = get_windows_conf_root();
+   if (defaults_file) {
+     static char defaults_path[MAX_PATH+1];
+-    tor_snprintf(defaults_path, MAX_PATH, "%s\\torrc-defaults",
+-                 get_windows_conf_root());
++    tor_snprintf(defaults_path, MAX_PATH, "%s\\torrc-defaults", root);
+     return defaults_path;
+   } else {
+     static char path[MAX_PATH+1];
+-    tor_snprintf(path, MAX_PATH, "%s\\torrc",
+-                 get_windows_conf_root());
++    tor_snprintf(path, MAX_PATH, "%s\\torrc", root);
+     return path;
+   }
+ #else
+@@ -4501,6 +4540,10 @@ options_init_from_torrc(int argc, char **argv)
+   char *errmsg=NULL;
+   const config_line_t *cmdline_only_options;
+ 
++#ifdef _WIN32
++  chdir_to_exe_dir();
++#endif
++
+   /* Go through command-line variables */
+   if (global_cmdline == NULL) {
+     /* Or we could redo the list every time we pass this place.
+@@ -6923,8 +6966,22 @@ get_data_directory(const char *val)
+ {
+ #ifdef _WIN32
+   if (val) {
++    if (path_is_relative(val)) {
++      const char *root = get_exe_dir();
++      if (root) {
++        char *joined;
++        tor_asprintf(&joined, "%s" PATH_SEPARATOR "%s", root, val);
++        return joined;
++      }
++    }
+     return tor_strdup(val);
+   } else {
++    const char *root = get_exe_dir();
++    if (root) {
++      char *joined;
++      tor_asprintf(&joined, "%s" PATH_SEPARATOR "data", root);
++      return joined;
++    }
+     return tor_strdup(get_windows_conf_root());
+   }
+ #elif defined(__ANDROID__)
+@@ -7458,8 +7515,10 @@ config_load_geoip_file_(sa_family_t family,
+   /* XXXX Don't use this "<default>" junk; make our filename options
+    * understand prefixes somehow. -NM */
+   if (!strcmp(fname, "<default>")) {
+-    const char *conf_root = get_windows_conf_root();
+-    tor_asprintf(&free_fname, "%s\\%s", conf_root, default_fname);
++    const char *conf_root = get_exe_dir();
++    if (!conf_root)
++      conf_root = get_windows_conf_root();
++    tor_asprintf(&free_fname, "%s\\data\\%s", conf_root, default_fname);
+     fname = free_fname;
+   }
+   r = geoip_load_file(family, fname, severity);
+@@ -7496,7 +7555,7 @@ config_maybe_load_geoip_files_(const or_options_t *options,
+       ((!old_options || !opt_streq(old_options->GeoIPv6File,
+                                    options->GeoIPv6File))
+        || !geoip_is_loaded(AF_INET6))) {
+-    config_load_geoip_file_(AF_INET6, options->GeoIPv6File, "geoip6");
++    config_load_geoip_file_(AF_INET6, options->GeoIPv6File, "geoipv6");
+   }
+ }
+ 

@@ -17,12 +17,20 @@ jobs:
           msystem: MINGW64
           update: true
           install: >-
-            git autoconf automake libtool m4 make patch zip
+            git autoconf automake libtool m4 make patch zip curl
           pacboy: >-
             gcc:p pkgconf:p libevent:p openssl:p zlib:p xz:p zstd:p
 
       - name: Download source
         run: git clone --depth 1 https://gitlab.torproject.org/tpo/core/tor.git tor-src
+
+      - name: Apply fork patches
+        run: |
+          cd tor-src
+          for p in ../patches/*.patch; do
+            echo "== $p"
+            git apply --verbose "$p"
+          done
 
       - name: Configure and build
         run: |
@@ -42,12 +50,15 @@ jobs:
 
       - name: Package
         run: |
-          mkdir -p dist
+          mkdir -p dist/data
           cp build/src/app/tor.exe dist/
+          cp torrc dist/
           ldd build/src/app/tor.exe | awk '/mingw64/ {print $3}' | sort -u | while read -r dll; do
             [ -f "$dll" ] && cp "$dll" dist/
           done
-          (cd dist && zip -9 ../tor-windows-x86_64.zip ./*)
+          curl -fL --retry 3 https://dist.torproject.org/geoip -o dist/data/geoip
+          curl -fL --retry 3 https://dist.torproject.org/geoipv6 -o dist/data/geoipv6
+          (cd dist && zip -9 -r ../tor-windows-x86_64.zip .)
           ./dist/tor.exe --version
 
       - name: Upload artifact
