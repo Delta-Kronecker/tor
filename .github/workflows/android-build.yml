@@ -126,6 +126,7 @@ jobs:
             --disable-unittests \
             --disable-tool-name-check \
             --disable-zstd \
+            --enable-pic \
             CPPFLAGS="-I$DEPS/include" \
             LDFLAGS="-L$DEPS/lib -L$DEPS/lib64" \
             CFLAGS="-O2 -fPIC"
