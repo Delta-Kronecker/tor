@@ -69,7 +69,7 @@ jobs:
           curl -fsSL -o work/zlib.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
           tar -C work -xzf work/zlib.tar.gz
           ( cd work/zlib-1.3.1
-            CHOST=${{ matrix.triple }} ./configure --static --prefix="$DEPS"
+            CHOST=${{ matrix.triple }} CFLAGS="-O2 -fPIC" ./configure --static --prefix="$DEPS"
             make -j"$(nproc)"
             make install )
 
@@ -94,6 +94,7 @@ jobs:
             -DEVENT__DISABLE_OPENSSL=ON \
             -DEVENT__LIBRARY_TYPE=STATIC \
             -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -DCMAKE_HAVE_LIBC_PTHREAD=1 \
             -DTHREADS_PREFER_PTHREAD_FLAG=ON
           cmake --build work/libevent-build -j"$(nproc)"
@@ -126,8 +127,27 @@ jobs:
             --disable-tool-name-check \
             --disable-zstd \
             CPPFLAGS="-I$DEPS/include" \
-            LDFLAGS="-L$DEPS/lib -L$DEPS/lib64"
+            LDFLAGS="-L$DEPS/lib -L$DEPS/lib64" \
+            CFLAGS="-O2 -fPIC"
           make -j"$(nproc)"
+
+      - name: Build libtor.so
+        run: |
+          set -euo pipefail
+          DEPS="$GITHUB_WORKSPACE/deps"
+          cd "$GITHUB_WORKSPACE/build-android"
+          OBJS=$(find . -name '*.o' -not -path '*/test/*' -not -path '*/tools/*' | sort)
+          echo "linking $(echo "$OBJS" | wc -l) objects"
+          "$TOOLCHAIN/bin/clang" -shared -fPIC -o libtor.so $OBJS \
+            -L"$DEPS/lib" -L"$DEPS/lib64" \
+            -Wl,--allow-multiple-definition \
+            -lssl -lcrypto \
+            -levent -levent_core -levent_extra -levent_pthreads \
+            -lz -llog -ldl -lm
+          file libtor.so
+          "$TOOLCHAIN/bin/llvm-readelf" -h libtor.so | grep -E "Class|Type|Machine"
+          "$TOOLCHAIN/bin/llvm-nm" -D --defined-only libtor.so | grep -c " T "
+          "$TOOLCHAIN/bin/llvm-nm" -D --defined-only libtor.so | grep -E " T (options_init_from_torrc|tor_run_main|network_init|tor_main)" || true
 
       - name: Verify binary
         run: |
@@ -138,6 +158,7 @@ jobs:
         run: |
           mkdir -p dist-android/data
           cp build-android/src/app/tor dist-android/tor
+          cp build-android/libtor.so dist-android/libtor.so
           cp tor-src/src/config/geoip dist-android/data/geoip
           cp tor-src/src/config/geoip6 dist-android/data/geoipv6
           (cd dist-android && zip -9 -r "../tor-android-${{ matrix.abi }}.zip" .)
