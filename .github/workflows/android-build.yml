@@ -22,7 +22,7 @@ jobs:
           - abi: armeabi-v7a
             triple: arm-linux-androideabi
             clang: armv7a-linux-androideabi24-clang
-            openssl_target: android-armv7
+            openssl_target: android-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +36,8 @@ jobs:
           curl -fsSL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
           unzip -q ndk.zip
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r27c" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$PWD/android-ndk-r27c" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$PWD/android-ndk-r27c" >> "$GITHUB_ENV"
           echo "TOOLCHAIN=$PWD/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64" >> "$GITHUB_ENV"
 
       - name: Download source
