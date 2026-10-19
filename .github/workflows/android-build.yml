@@ -90,7 +90,9 @@ jobs:
             -DEVENT__DISABLE_SAMPLES=ON \
             -DEVENT__DISABLE_OPENSSL=ON \
             -DEVENT__LIBRARY_TYPE=STATIC \
-            -DBUILD_SHARED_LIBS=OFF
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_HAVE_LIBC_PTHREAD=1 \
+            -DTHREADS_PREFER_PTHREAD_FLAG=ON
           cmake --build work/libevent-build -j"$(nproc)"
           cmake --install work/libevent-build
 
