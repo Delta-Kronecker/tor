@@ -1,0 +1,131 @@
+name: Android build
+
+on:
+  push:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool make perl cmake unzip curl
+
+      - name: Install Android NDK
+        run: |
+          curl -fsSL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q ndk.zip
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-r27c" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN=$PWD/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64" >> "$GITHUB_ENV"
+
+      - name: Download source
+        run: |
+          git clone https://gitlab.torproject.org/tpo/core/tor.git tor-src
+          git -C tor-src checkout tor-0.4.9.11
+          git -C tor-src log --oneline -1
+
+      - name: Apply fork patches
+        run: |
+          cd tor-src
+          for p in ../patches/*.patch; do
+            echo "== $p"
+            tr -d '\r' < "$p" > .patch.lf
+            git apply --verbose .patch.lf
+            rm -f .patch.lf
+          done
+
+      - name: Build dependencies (zlib, openssl, libevent)
+        run: |
+          set -euo pipefail
+          DEPS="$GITHUB_WORKSPACE/deps-arm64"
+          mkdir -p "$DEPS" work
+          export CC="$TOOLCHAIN/bin/aarch64-linux-android24-clang"
+
+          curl -fsSL -o work/zlib.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+          tar -C work -xzf work/zlib.tar.gz
+          ( cd work/zlib-1.3.1
+            CHOST=aarch64-linux-android ./configure --static --prefix="$DEPS"
+            make -j"$(nproc)"
+            make install )
+
+          curl -fsSL -o work/openssl.tar.gz https://github.com/openssl/openssl/releases/download/openssl-3.0.16/openssl-3.0.16.tar.gz
+          tar -C work -xzf work/openssl.tar.gz
+          ( export PATH="$TOOLCHAIN/bin:$PATH"
+            cd work/openssl-3.0.16
+            ./Configure android-arm64 -D__ANDROID_API__=24 --prefix="$DEPS" --openssldir="$DEPS/ssl" no-shared no-tests
+            make -j"$(nproc)"
+            make install_sw )
+
+          curl -fsSL -o work/libevent.tar.gz https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz
+          tar -C work -xzf work/libevent.tar.gz
+          cmake -S work/libevent-2.1.12-stable -B work/libevent-build \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_INSTALL_PREFIX="$DEPS" \
+            -DEVENT__DISABLE_TESTS=ON \
+            -DEVENT__DISABLE_REGRESS=ON \
+            -DEVENT__DISABLE_SAMPLES=ON \
+            -DEVENT__DISABLE_OPENSSL=ON \
+            -DEVENT__LIBRARY_TYPE=STATIC \
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build work/libevent-build -j"$(nproc)"
+          cmake --install work/libevent-build
+
+      - name: Configure and build tor (arm64)
+        run: |
+          set -euo pipefail
+          DEPS="$GITHUB_WORKSPACE/deps-arm64"
+          cd tor-src
+          autoreconf -fi
+          mkdir -p "$GITHUB_WORKSPACE/build-android"
+          cd "$GITHUB_WORKSPACE/build-android"
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          CC=aarch64-linux-android24-clang \
+          ../tor-src/configure \
+            --host=aarch64-linux-android \
+            --build="$(../tor-src/config.guess)" \
+            --with-openssl-dir="$DEPS" \
+            --with-libevent-dir="$DEPS" \
+            --with-zlib-dir="$DEPS" \
+            --disable-asciidoc \
+            --disable-man \
+            --disable-html-docs \
+            --disable-unittests \
+            CPPFLAGS="-I$DEPS/include" \
+            LDFLAGS="-L$DEPS/lib -L$DEPS/lib64"
+          make -j"$(nproc)"
+
+      - name: Verify binary
+        run: |
+          file build-android/src/app/tor
+          "$TOOLCHAIN/bin/llvm-readelf" -h build-android/src/app/tor | grep -E "Class|Machine"
+
+      - name: Package
+        run: |
+          mkdir -p dist-android/data
+          cp build-android/src/app/tor dist-android/tor
+          cp tor-src/src/config/geoip dist-android/data/geoip
+          cp tor-src/src/config/geoip6 dist-android/data/geoipv6
+          (cd dist-android && zip -9 -r ../tor-android-arm64.zip .)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tor-android-arm64
+          path: tor-android-arm64.zip
+
+      - name: Upload config log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-config-log
+          path: build-android/config.log
