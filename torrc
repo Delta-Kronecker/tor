@@ -15,8 +15,8 @@ UseMicrodescriptors 1
 DormantOnFirstStartup 0
 DormantCanceledByStartup 1
 LearnCircuitBuildTimeout 0
-MaxCircuitDirtiness 3600
-NumEntryGuards 15
+MaxCircuitDirtiness 600
+NumEntryGuards 10
 NumDirectoryGuards 6
 KeepalivePeriod 3600
 
@@ -45,9 +45,9 @@ ConfluxClientUX throughput
 SocksPort 127.0.0.1:9050
 
 CircuitsAvailableTimeout 4320
-CircuitStreamTimeout 10
-CircuitBuildTimeout 20
-NumPrimaryGuards 20
+CircuitStreamTimeout 60
+CircuitBuildTimeout 40
+NumPrimaryGuards 15
 Schedulers Vanilla
 MaxClientCircuitsPending 128
 CircuitPriorityHalflife 5
