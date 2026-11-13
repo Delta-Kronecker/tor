@@ -162,6 +162,7 @@ jobs:
           cp build-android/libtor.so dist-android/libtor.so
           cp tor-src/src/config/geoip dist-android/data/geoip
           cp tor-src/src/config/geoip6 dist-android/data/geoipv6
+          cp torrc-android dist-android/torrc
           (cd dist-android && zip -9 -r "../tor-android-${{ matrix.abi }}.zip" .)
 
       - name: Upload artifact

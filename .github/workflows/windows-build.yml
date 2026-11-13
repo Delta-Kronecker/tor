@@ -73,7 +73,7 @@ jobs:
         run: |
           mkdir -p dist/data
           cp build/src/app/tor.exe dist/
-          cp torrc dist/
+          cp torrc-windows dist/torrc
           ldd build/src/app/tor.exe | awk '/mingw64/ {print $3}' | sort -u | while read -r dll; do
             [ -f "$dll" ] && cp "$dll" dist/
           done

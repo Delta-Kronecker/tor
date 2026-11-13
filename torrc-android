@@ -1,0 +1,54 @@
+SocksPolicy accept 127.0.0.1
+SocksPolicy reject *
+
+CircuitPadding 0
+ConnectionPadding 0
+UseMicrodescriptors 1
+HardwareAcceleration 1
+
+DormantOnFirstStartup 0
+DormantCanceledByStartup 1
+LearnCircuitBuildTimeout 1
+MaxCircuitDirtiness 1800
+NumEntryGuards 10
+NumDirectoryGuards 6
+KeepalivePeriod 3600
+ClientUseIPv6 1
+
+ClientBootstrapConsensusAuthorityDownloadInitialDelay 0
+ClientBootstrapConsensusFallbackDownloadInitialDelay 0
+ClientBootstrapConsensusAuthorityOnlyDownloadInitialDelay 0
+ClientBootstrapConsensusMaxInProgressTries 10
+
+FetchDirInfoEarly 1
+FetchDirInfoExtraEarly 1
+
+PathsNeededToBuildCircuits 0.25
+
+DisableDebuggerAttachment 1
+AvoidDiskWrites 1
+SafeLogging 1
+
+ConfluxEnabled 1
+ConfluxClientUX throughput
+
+CircuitsAvailableTimeout 4320
+CircuitStreamTimeout 60
+CircuitBuildTimeout 40
+NumPrimaryGuards 15
+# KISTLite is the best scheduler available on Android; Vanilla is only fallback.
+Schedulers KIST,KISTLite,Vanilla
+MaxClientCircuitsPending 256
+CircuitPriorityHalflife 5
+SocksTimeout 30
+
+# Keep a small pool of ready conflux sets and spread streams across all of them
+# (fewest-streams policy) instead of building 32 sets but only using the fastest
+# handful. Leave the RTT percentage filter off so every prebuilt set carries
+# user traffic, but skip clearly slow sets via ConfluxSetRttMax.
+ConfluxNumSets 8
+ConfluxNumLinkedSets 8
+ConfluxNumLegs 3
+ConfluxSetSelection 2
+ConfluxSetRttPct 0
+ConfluxSetRttMax 800
