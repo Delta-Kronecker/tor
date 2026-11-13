@@ -42,15 +42,15 @@ MaxClientCircuitsPending 256
 CircuitPriorityHalflife 5
 SocksTimeout 30
 
-# Keep a small pool of ready conflux sets and spread streams across all of them
-# (fewest-streams policy) instead of building 32 sets but only using the fastest
-# handful. Leave the RTT percentage filter off so every prebuilt set carries
-# user traffic, but skip clearly slow sets via ConfluxSetRttMax.
+# Keep a small pool of ready conflux sets. Restrict new streams to the fastest
+# ConfluxSetRttPct% of candidate sets (17% keeps just the single fastest set
+# with the default pool of 8), then use the fewest-streams policy across those
+# to balance load. Sets slower than ConfluxSetRttMax are skipped entirely.
 ConfluxNumSets 8
 ConfluxNumLinkedSets 8
 ConfluxNumLegs 3
 ConfluxSetSelection 2
-ConfluxSetRttPct 0
+ConfluxSetRttPct 17
 ConfluxSetRttMax 800
 # With more than two legs per set (ConfluxNumLegs above), upstream's conflux
 # scheduler wants cfx_drain_pct 100 so a leg can be switched away from as soon
