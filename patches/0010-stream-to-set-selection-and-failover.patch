@@ -268,9 +268,13 @@ index 165a8f6..f080097 100644
    DIGEST256MAP_FOREACH(client_linked_pool, key, conflux_t *, cfx) {
      /* Get the first circuit of the set. */
      conflux_leg_t *leg = smartlist_get(cfx->legs, 0);
-@@ -1448,11 +1550,36 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+@@ -1448,15 +1550,40 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
        continue;
      }
+ 
+     /* The stream will be carried by every leg of this set, and every leg
+      * holds the same isolation state so the check above on the first leg
+      * answers for the whole set. */
  
 -    /* Found a circuit that works. */
 -    return ocirc;

@@ -46,7 +46,7 @@ jobs:
       - name: Download source
         run: |
           git clone https://gitlab.torproject.org/tpo/core/tor.git tor-src
-          git -C tor-src checkout tor-0.4.9.11
+          git -C tor-src checkout tor-0.4.9.16
           git -C tor-src log --oneline -1
 
       - name: Apply fork patches
