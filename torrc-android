@@ -60,3 +60,29 @@ ConfluxDrainPct 100
 # by default tor builds a single prebuilt set when under 60% of Exits support
 # conflux, which caps parallelism.
 ConfluxLowExitThreshold 1
+
+# DeltaTor speed tuning: buffers. Keep more cells queued per circuit and per OR
+# connection so high-latency links stay busy instead of going idle between
+# scheduler runs (costs memory).
+CircuitCellQueueHigh 512
+CircuitCellQueueLow 64
+OrConnHighWater 65536
+OrConnLowWater 32768
+
+# DeltaTor speed tuning: congestion window. Start with a bigger window and grow
+# it faster so uploads ramp up sooner.
+CongestionControlCwndInit 300
+CongestionControlCwndInc 2
+CongestionControlCwndIncPctSs 300
+CongestionControlCwndIncRate 62
+
+# DeltaTor speed tuning: start bandwidth (BDP) estimation sooner.
+CongestionControlBweMin 2
+
+# DeltaTor speed tuning: let the client buffer more downloaded data before
+# pausing a stream, which helps bulk download throughput.
+CongestionControlXoffClient 1000
+
+# DeltaTor speed tuning: allow more in-flight data to sit in the kernel socket
+# buffer (3 congestion windows instead of 2).
+KISTSockBufSizeFactor 2.0

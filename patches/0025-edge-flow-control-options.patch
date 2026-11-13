@@ -1,0 +1,145 @@
+From 03dc86c4dea5537ca35cc362f7efc3b12c0e9a34 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 07:24:48 +0330
+Subject: [PATCH] congestion: expose edge flow-control (XOFF/XON) params as
+ torrc options
+
+DeltaTor extension: add CongestionControlXoffClient/XoffExit/XonChangePct/
+XonRate/XonEwmaCnt torrc options (0 = consensus default) that override the
+consensus cc_xoff_client, cc_xoff_exit, cc_xon_change_pct, cc_xon_rate and
+cc_xon_ewma_cnt values. A larger client XOFF limit lets the client buffer more
+downloaded data before pausing a stream, which helps bulk download throughput.
+---
+ src/app/config/config.c               | 35 +++++++++++++++++++++++++++
+ src/app/config/or_options_st.h        | 27 +++++++++++++++++++++
+ src/core/or/congestion_control_flow.c | 23 ++++++++++++++++++
+ 3 files changed, 85 insertions(+)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index b7d53f0..883616d 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -408,6 +408,11 @@ static const config_var_t option_vars_[] = {
+   V(CongestionControlEwmaMax,    INT,      "0"),
+   V(CongestionControlEwmaSs,     INT,      "0"),
+   V(CongestionControlRttResetPct, INT,     "0"),
++  V(CongestionControlXoffClient, INT,      "0"),
++  V(CongestionControlXoffExit,   INT,      "0"),
++  V(CongestionControlXonChangePct, INT,    "0"),
++  V(CongestionControlXonRate,    INT,      "0"),
++  V(CongestionControlXonEwmaCnt, INT,      "0"),
+   V(ConnLimit,                   POSINT,     "1000"),
+   V(ConnDirectionStatistics,     BOOL,     "0"),
+   V(ConstrainedSockets,          BOOL,     "0"),
+@@ -3733,6 +3738,36 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+            "and 100 percent");
+   }
+ 
++  if (options->CongestionControlXoffClient < 0 ||
++      options->CongestionControlXoffClient > 10000) {
++    REJECT("CongestionControlXoffClient must be between 0 (consensus default) "
++           "and 10000");
++  }
++
++  if (options->CongestionControlXoffExit < 0 ||
++      options->CongestionControlXoffExit > 10000) {
++    REJECT("CongestionControlXoffExit must be between 0 (consensus default) "
++           "and 10000");
++  }
++
++  if (options->CongestionControlXonChangePct < 0 ||
++      options->CongestionControlXonChangePct > 99) {
++    REJECT("CongestionControlXonChangePct must be between 0 (consensus "
++           "default) and 99 percent");
++  }
++
++  if (options->CongestionControlXonRate < 0 ||
++      options->CongestionControlXonRate > 5000) {
++    REJECT("CongestionControlXonRate must be between 0 (consensus default) "
++           "and 5000");
++  }
++
++  if (options->CongestionControlXonEwmaCnt < 0 ||
++      options->CongestionControlXonEwmaCnt > 100) {
++    REJECT("CongestionControlXonEwmaCnt must be between 0 (consensus default) "
++           "and 100");
++  }
++
+   if (options_validate_publish_server(old_options, options, msg) < 0)
+     return -1;
+ 
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index fc48c3e..59a4f49 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -890,6 +890,33 @@ struct or_options_t {
+    * the consensus value (100). */
+   int CongestionControlRttResetPct;
+ 
++  /** DeltaTor extension: override the consensus cc_xoff_client, the client
++   * (edge) outbuf size, in RELAY_PAYLOAD_SIZE_MIN units, above which we send an
++   * XOFF to pause a stream. 0 (default) keeps the consensus value (500). A
++   * larger value buffers more downloaded data before pausing, which helps bulk
++   * download throughput at the cost of memory. */
++  int CongestionControlXoffClient;
++
++  /** DeltaTor extension: override the consensus cc_xoff_exit, the exit outbuf
++   * XOFF threshold in RELAY_PAYLOAD_SIZE_MIN units. 0 (default) keeps the
++   * consensus value (500). */
++  int CongestionControlXoffExit;
++
++  /** DeltaTor extension: override the consensus cc_xon_change_pct, the percent
++   * change in drain rate needed to send an advisory XON. 0 (default) keeps the
++   * consensus value (25). */
++  int CongestionControlXonChangePct;
++
++  /** DeltaTor extension: override the consensus cc_xon_rate, the number of
++   * RELAY_PAYLOAD_SIZE_MAX units drained before updating the advisory drain
++   * rate. 0 (default) keeps the consensus value (500). */
++  int CongestionControlXonRate;
++
++  /** DeltaTor extension: override the consensus cc_xon_ewma_cnt, the N of the
++   * EWMA used for the advisory drain rate. 0 (default) keeps the consensus
++   * value (2). */
++  int CongestionControlXonEwmaCnt;
++
+   /** The length of time that we think a consensus should be fresh. */
+   int V3AuthVotingInterval;
+   /** The length of time we think it will take to distribute votes. */
+diff --git a/src/core/or/congestion_control_flow.c b/src/core/or/congestion_control_flow.c
+index 84807c4..2ace343 100644
+--- a/src/core/or/congestion_control_flow.c
++++ b/src/core/or/congestion_control_flow.c
+@@ -137,6 +137,29 @@ flow_control_new_consensus_params(const networkstatus_t *ns)
+       CC_XON_EWMA_CNT_DFLT,
+       CC_XON_EWMA_CNT_MIN,
+       CC_XON_EWMA_CNT_MAX);
++
++  /* DeltaTor extension: the torrc edge flow-control options (0 = consensus
++   * default) override the consensus cc_xoff_* and cc_xon_* values. A larger
++   * client XOFF limit lets the client buffer more downloaded data before
++   * pausing a stream, which helps bulk download throughput. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts) {
++      if (opts->CongestionControlXoffClient > 0)
++        xoff_client = (uint32_t) opts->CongestionControlXoffClient *
++                      RELAY_PAYLOAD_SIZE_MIN;
++      if (opts->CongestionControlXoffExit > 0)
++        xoff_exit = (uint32_t) opts->CongestionControlXoffExit *
++                    RELAY_PAYLOAD_SIZE_MIN;
++      if (opts->CongestionControlXonChangePct > 0)
++        xon_change_pct = (uint32_t) opts->CongestionControlXonChangePct;
++      if (opts->CongestionControlXonRate > 0)
++        xon_rate_bytes = (uint32_t) opts->CongestionControlXonRate *
++                         RELAY_PAYLOAD_SIZE_MAX;
++      if (opts->CongestionControlXonEwmaCnt > 0)
++        xon_ewma_cnt = (uint32_t) opts->CongestionControlXonEwmaCnt;
++    }
++  }
+ }
+ 
+ /**
+-- 
+2.56.0.windows.2
+
