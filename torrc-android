@@ -52,3 +52,11 @@ ConfluxNumLegs 3
 ConfluxSetSelection 2
 ConfluxSetRttPct 0
 ConfluxSetRttMax 800
+# With more than two legs per set (ConfluxNumLegs above), upstream's conflux
+# scheduler wants cfx_drain_pct 100 so a leg can be switched away from as soon
+# as its in-flight data drains; otherwise switching is blocked.
+ConfluxDrainPct 100
+# Keep the full prebuilt-set pool even though conflux Exits are a minority:
+# by default tor builds a single prebuilt set when under 60% of Exits support
+# conflux, which caps parallelism.
+ConfluxLowExitThreshold 1

@@ -1,0 +1,44 @@
+From dd8da7b851f82a34f6e1c45d15363ddc8579b766 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 07:04:32 +0330
+Subject: [PATCH] conflux: clamp ConfluxNumLegs to cfx_max_legs_set
+
+DeltaTor extension: a conflux set can never link when it has more legs than
+cfx_max_legs_set allows, since the Exit enforces the same cap. Clamp both the
+consensus/torrc leg count and the runtime CONFLUX SET value to max_legs_set so
+an over-large ConfluxNumLegs no longer makes every link attempt fail.
+---
+ src/core/or/conflux_params.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index 448e746..464fab7 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -245,7 +245,7 @@ void
+ conflux_params_set_num_legs(uint8_t n)
+ {
+   if (n > 0 && n <= 16) {
+-    num_legs_set = n;
++    num_legs_set = MIN(n, max_legs_set);
+   }
+ }
+ 
+@@ -378,6 +378,14 @@ conflux_params_new_consensus(const networkstatus_t *ns)
+                             MAX_LEGS_SET_DEFAULT,
+                             MAX_LEGS_SET_MIN, MAX_LEGS_SET_MAX);
+ 
++  /* DeltaTor extension: a set can never link with more legs than
++   * cfx_max_legs_set allows (the Exit enforces the same cap while linking), so
++   * clamp the requested number of legs to the maximum. Without this, a
++   * ConfluxNumLegs value above the cap would make every link attempt fail. */
++  if (num_legs_set > max_legs_set) {
++    num_legs_set = max_legs_set;
++  }
++
+   /* DeltaTor extension: the torrc ConfluxNumSets / ConfluxNumLinkedSets options
+    * (0 = consensus default) override the consensus cfx_max_prebuilt_set /
+    * cfx_max_linked_set values. ConfluxNumSets is the number of sets kept alive
+-- 
+2.56.0.windows.2
+
