@@ -61,13 +61,12 @@ SocksTimeout 120
 # Keep a small pool of ready conflux sets. Restrict new streams to the fastest
 # ConfluxSetRttPct% of candidate sets (17% keeps just the single fastest set
 # with the default pool of 8), then use the fewest-streams policy across those
-# to balance load. Sets slower than ConfluxSetRttMax are skipped entirely.
+# to balance load.
 ConfluxNumSets 8
 ConfluxNumLinkedSets 8
 ConfluxNumLegs 3
 ConfluxSetSelection 2
 ConfluxSetRttPct 17
-ConfluxSetRttMax 800
 # With more than two legs per set (ConfluxNumLegs above), upstream's conflux
 # scheduler wants cfx_drain_pct 100 so a leg can be switched away from as soon
 # as its in-flight data drains; otherwise switching is blocked.
