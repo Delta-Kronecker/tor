@@ -24,7 +24,7 @@ jobs:
           install: >-
             git autoconf automake libtool m4 make patch zip
           pacboy: >-
-            gcc:p pkgconf:p libevent:p openssl:p zlib:p xz:p zstd:p
+            gcc:p pkgconf:p libevent:p openssl:p zlib:p xz:p zstd:p jemalloc:p
 
       - name: Download source
         run: |
@@ -61,9 +61,12 @@ jobs:
               --build=x86_64-w64-mingw32 \
               --host=x86_64-w64-mingw32 \
               --with-openssl-dir=/mingw64 \
+              --with-malloc=jemalloc \
               --disable-asciidoc \
+              --disable-unittests \
               --disable-gcc-hardening \
-              CFLAGS='-O2 -D__USE_MINGW_ANSI_STDIO=0'
+              LDFLAGS='-s' \
+              CFLAGS='-O3 -flto -D__USE_MINGW_ANSI_STDIO=0'
           make -j"$(nproc)"
 
       - name: Package

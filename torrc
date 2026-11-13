@@ -20,11 +20,12 @@ MaxCircuitDirtiness 1800
 NumEntryGuards 10
 NumDirectoryGuards 6
 KeepalivePeriod 3600
+ClientUseIPv6 1
 
 ClientBootstrapConsensusAuthorityDownloadInitialDelay 0
 ClientBootstrapConsensusFallbackDownloadInitialDelay 0
 ClientBootstrapConsensusAuthorityOnlyDownloadInitialDelay 0
-ClientBootstrapConsensusMaxInProgressTries 6
+ClientBootstrapConsensusMaxInProgressTries 10
 
 FetchDirInfoEarly 1
 FetchDirInfoExtraEarly 1
@@ -57,12 +58,13 @@ MaxClientCircuitsPending 256
 CircuitPriorityHalflife 5
 SocksTimeout 120
 
-# Keep a small pool of ready 2-leg sets and spread streams across all of them
+# Keep a small pool of ready conflux sets and spread streams across all of them
 # (fewest-streams policy) instead of building 32 sets but only using the fastest
-# handful. Align ConfluxNumLinkedSets with ConfluxNumSets and leave the RTT
-# filter off so every prebuilt set actually carries user traffic.
+# handful. Leave the RTT percentage filter off so every prebuilt set carries
+# user traffic, but skip clearly slow sets via ConfluxSetRttMax.
 ConfluxNumSets 8
 ConfluxNumLinkedSets 8
-ConfluxNumLegs 2
+ConfluxNumLegs 3
 ConfluxSetSelection 2
 ConfluxSetRttPct 0
+ConfluxSetRttMax 800
