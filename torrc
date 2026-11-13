@@ -11,11 +11,12 @@ GeoIPv6File data/geoipv6
 CircuitPadding 0
 ConnectionPadding 0
 UseMicrodescriptors 1
+HardwareAcceleration 1
 
 DormantOnFirstStartup 0
 DormantCanceledByStartup 1
-LearnCircuitBuildTimeout 0
-MaxCircuitDirtiness 600
+LearnCircuitBuildTimeout 1
+MaxCircuitDirtiness 1800
 NumEntryGuards 10
 NumDirectoryGuards 6
 KeepalivePeriod 3600
@@ -43,18 +44,25 @@ ConfluxEnabled 1
 ConfluxClientUX throughput
 
 SocksPort 127.0.0.1:9050
+# Dedicated keep-alive port expected by the conflux keep-alive logic.
+SocksPort 127.0.0.1:9052 NoIsolateSOCKSAuth
 
 CircuitsAvailableTimeout 4320
 CircuitStreamTimeout 60
 CircuitBuildTimeout 40
 NumPrimaryGuards 15
-Schedulers Vanilla
-MaxClientCircuitsPending 128
+# KISTLite is the best scheduler available on Windows; Vanilla is only fallback.
+Schedulers KIST,KISTLite,Vanilla
+MaxClientCircuitsPending 256
 CircuitPriorityHalflife 5
 SocksTimeout 120
 
-ConfluxNumSets 32
-ConfluxNumLinkedSets 32
+# Keep a small pool of ready 2-leg sets and spread streams across all of them
+# (fewest-streams policy) instead of building 32 sets but only using the fastest
+# handful. Align ConfluxNumLinkedSets with ConfluxNumSets and leave the RTT
+# filter off so every prebuilt set actually carries user traffic.
+ConfluxNumSets 8
+ConfluxNumLinkedSets 8
 ConfluxNumLegs 2
-ConfluxSetSelection 1
-ConfluxSetRttPct 10
+ConfluxSetSelection 2
+ConfluxSetRttPct 0

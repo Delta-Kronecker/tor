@@ -129,7 +129,7 @@ jobs:
             --enable-pic \
             CPPFLAGS="-I$DEPS/include" \
             LDFLAGS="-L$DEPS/lib -L$DEPS/lib64" \
-            CFLAGS="-O2 -fPIC"
+            CFLAGS="-O3 -fPIC"
           make -j"$(nproc)"
 
       - name: Build libtor.so
