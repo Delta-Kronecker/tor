@@ -1,0 +1,254 @@
+From c8ed5907b5444c93bc7ac62a57db3bd2d97f94f1 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 20:54:09 +0330
+Subject: [PATCH 32/32] docs: document the DeltaTor speed-tuning torrc options
+
+---
+ doc/DELTATOR-CHANGES.md |  21 +++++
+ doc/man/tor.1.txt       | 198 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 219 insertions(+)
+
+diff --git a/doc/DELTATOR-CHANGES.md b/doc/DELTATOR-CHANGES.md
+index 16297dd..50fe21a 100644
+--- a/doc/DELTATOR-CHANGES.md
++++ b/doc/DELTATOR-CHANGES.md
+@@ -17,6 +17,27 @@ All options are validated in `src/app/config/config.c` and documented in
+ | `ConfluxSetSelection` | 0-3 | Set pick policy for new streams: first / round-robin / least-streams / fastest |
+ | `ConfluxSetRttMax` | >= 0 ms | Skip sets whose best-leg RTT is at/above this (never empties the candidate list) |
+ | `ConfluxSetRttPct` | 0-100 % | Restrict new streams to the best N% of sets by RTT (keeps at least one set) |
++| `ConfluxDrainPct` | 0-255 | Leg drain percent before a leg switch is allowed; 100 lets a leg be swapped as soon as its in-flight data drains |
++| `ConfluxLowExitThreshold` | 0-100 % | Exit-support ratio below which only one prebuilt set is built; 1 keeps the full ConfluxNumSets pool |
++| `ConfluxMaxOooqBytes` | >= 0 bytes | Max bytes buffered per conflux out-of-order queue before the set is closed (0 = consensus default) |
++| `ConfluxMaxUnlinkedLegRetry` | 0-255 | Max retries for an unlinked leg before the set gives up (0 = consensus default) |
++| `ConfluxMaxLegsSet` | 0-255 | Max legs a set may link with; ConfluxNumLegs is clamped to it (0 = consensus default) |
++| `CircuitCellQueueHigh` / `CircuitCellQueueLow` | 0-1000 cells | Circuit cell-queue high/low watermarks (0 = consensus default) |
++| `OrConnHighWater` / `OrConnLowWater` | >= 0 bytes | OR-connection outbuf high/low watermarks (0 = consensus default) |
++| `CongestionControlCwndInit` / `CwndInc` / `CwndIncPctSs` / `CwndIncRate` / `CwndMin` | 0 = consensus | Congestion-window size, growth and floor |
++| `CongestionControlBweMin` / `EwmaCwndPct` / `EwmaMax` / `EwmaSs` / `RttResetPct` | 0 = consensus | Bandwidth (BDP) estimator tuning |
++| `CongestionControlXoffClient` / `XoffExit` / `XonChangePct` / `XonRate` / `XonEwmaCnt` | 0 = consensus | Edge flow-control (XOFF/XON) thresholds |
++| `CongestionControlVegasAlphaExit` / `BetaExit` / `GammaExit` / `DeltaExit` / `SsCapExit` | 0 = consensus | Vegas congestion-control thresholds on exit circuits |
++| `CongestionControlVegasSsMax` / `CwndFullMinPct` / `CwndFullGap` / `CwndFullPerCwnd` | 0 = consensus | Vegas slow-start cap and "cwnd full" policy |
++| `MaxPendingTasksPerCPU` | >= 0 | Max CPU-worker crypto tasks queued per CPU (0 = consensus default) |
++| `DirConsensusDiffMaxAge` | 0-8192 h | Max age for which the client requests a consensus diff (0 = consensus default) |
++| `HsDirSpreadFetch` | 0-128 | HSDirs a client fetches a hidden-service descriptor from (0 = consensus default) |
++| `HsIntroNumExtra` | 0-128 | Extra introduction points a hidden service publishes (0 = consensus default) |
++| `GuardMaxSampleSize` / `GuardMinFilteredSampleSize` / `GuardMaxSampleThresholdPercent` | 0 = consensus | Guard sampling limits |
++
++All of the congestion, buffer, flow-control and Vegas options above override
++the matching consensus parameter when set to a positive value; 0 keeps the
++consensus value, so an unmodified torrc behaves exactly like upstream.
+ 
+ Runtime plumbing lives in `src/core/or/conflux_params.c`; set selection,
+ RTT filters and stream load-balancing in
+diff --git a/doc/man/tor.1.txt b/doc/man/tor.1.txt
+index 93e5cd5..673ca4b 100644
+--- a/doc/man/tor.1.txt
++++ b/doc/man/tor.1.txt
+@@ -409,6 +409,204 @@ forward slash (/) in the configuration file and on the command line.
+     least one set. Applied after ConfluxSetRttMax. 0 disables the filter.
+     Valid range: 0-100. (Default: 0)
+ 
++[[ConfluxDrainPct]] **ConfluxDrainPct** __NUM__::
++    DeltaTor extension: override the consensus cfx_drain_pct, the percent of a
++    leg's in-flight data that must drain before a switch to another leg is
++    allowed. 100 lets a leg be swapped as soon as its in-flight data drains.
++    0 uses the consensus default. Valid range: 0-255. (Default: 0)
++
++[[ConfluxLowExitThreshold]] **ConfluxLowExitThreshold** __NUM__::
++    DeltaTor extension: override the consensus cfx_low_exit_threshold, the
++    percent of conflux-capable Exits below which tor builds only a single
++    prebuilt set. A small value keeps the full ConfluxNumSets pool. 0 uses the
++    consensus default. Valid range: 0-100. (Default: 0)
++
++[[ConfluxMaxOooqBytes]] **ConfluxMaxOooqBytes** __NUM__::
++    DeltaTor extension: override the consensus cfx_max_oooq_bytes, the maximum
++    bytes buffered per conflux out-of-order queue before the set is closed.
++    0 uses the consensus default. Must be >= 0. (Default: 0)
++
++[[ConfluxMaxUnlinkedLegRetry]] **ConfluxMaxUnlinkedLegRetry** __NUM__::
++    DeltaTor extension: override the consensus cfx_max_unlinked_leg_retry, how
++    many times an unlinked leg may be retried before the set gives up. 0 uses
++    the consensus default. Valid range: 0-255. (Default: 0)
++
++[[ConfluxMaxLegsSet]] **ConfluxMaxLegsSet** __NUM__::
++    DeltaTor extension: override the consensus cfx_max_legs_set, the maximum
++    number of legs a set may link with. ConfluxNumLegs is clamped to this. 0
++    uses the consensus default. Valid range: 0-255. (Default: 0)
++
++[[CircuitCellQueueHigh]] **CircuitCellQueueHigh** __NUM__::
++    DeltaTor extension: override the consensus cellq_high, the circuit cell
++    queue high watermark in cells. 0 uses the consensus default. Valid range:
++    0-1000. (Default: 0)
++
++[[CircuitCellQueueLow]] **CircuitCellQueueLow** __NUM__::
++    DeltaTor extension: override the consensus cellq_low, the circuit cell
++    queue low watermark in cells. 0 uses the consensus default. Valid range:
++    0-1000. (Default: 0)
++
++[[OrConnHighWater]] **OrConnHighWater** __NUM__::
++    DeltaTor extension: override the consensus orconn_high, the OR-connection
++    outbuf high watermark in bytes. 0 uses the consensus default. Must be
++    >= 0. (Default: 0)
++
++[[OrConnLowWater]] **OrConnLowWater** __NUM__::
++    DeltaTor extension: override the consensus orconn_low, the OR-connection
++    outbuf low watermark in bytes. 0 uses the consensus default. Must be
++    >= 0. (Default: 0)
++
++[[CongestionControlCwndInit]] **CongestionControlCwndInit** __NUM__::
++    DeltaTor extension: override the consensus cc_cwnd_init, the initial
++    congestion window in cells. 0 uses the consensus default. Valid range:
++    0-10000. (Default: 0)
++
++[[CongestionControlCwndInc]] **CongestionControlCwndInc** __NUM__::
++    DeltaTor extension: override the consensus cc_cwnd_inc, the cells the
++    congestion window grows by per update in congestion avoidance. 0 uses the
++    consensus default. Valid range: 0-1000. (Default: 0)
++
++[[CongestionControlCwndIncPctSs]] **CongestionControlCwndIncPctSs** __NUM__::
++    DeltaTor extension: override the consensus cc_cwnd_inc_pct_ss, the percent
++    of the congestion window added per slow-start update. 0 uses the consensus
++    default. Valid range: 0-500. (Default: 0)
++
++[[CongestionControlCwndIncRate]] **CongestionControlCwndIncRate** __NUM__::
++    DeltaTor extension: override the consensus cc_cwnd_inc_rate, the number of
++    SENDME acks between congestion-window updates. 0 uses the consensus
++    default. Valid range: 0-250. (Default: 0)
++
++[[CongestionControlCwndMin]] **CongestionControlCwndMin** __NUM__::
++    DeltaTor extension: override the consensus cc_cwnd_min, the minimum
++    congestion window in cells. 0 uses the consensus default. Valid range:
++    0-1000. (Default: 0)
++
++[[CongestionControlBweMin]] **CongestionControlBweMin** __NUM__::
++    DeltaTor extension: override the consensus cc_bwe_min, the minimum number
++    of SENDMEs before BDP estimation begins. 0 uses the consensus default.
++    Valid range: 0-20. (Default: 0)
++
++[[CongestionControlEwmaCwndPct]] **CongestionControlEwmaCwndPct** __NUM__::
++    DeltaTor extension: override the consensus cc_ewma_cwnd_pct, the number of
++    congestion windows worth of SENDME acks used to smooth RTT/BDP. 0 uses the
++    consensus default. Valid range: 0-255. (Default: 0)
++
++[[CongestionControlEwmaMax]] **CongestionControlEwmaMax** __NUM__::
++    DeltaTor extension: override the consensus cc_ewma_max, the maximum N for
++    the RTT/BDP EWMA. 0 uses the consensus default. Must be >= 0. (Default: 0)
++
++[[CongestionControlEwmaSs]] **CongestionControlEwmaSs** __NUM__::
++    DeltaTor extension: override the consensus cc_ewma_ss, the maximum N for
++    the slow-start RTT EWMA. 0 uses the consensus default. Must be >= 0.
++    (Default: 0)
++
++[[CongestionControlRttResetPct]] **CongestionControlRttResetPct** __NUM__::
++    DeltaTor extension: override the consensus cc_rtt_reset_pct, the percent of
++    the current RTT used when resetting the minimum RTT. 0 uses the consensus
++    default. Valid range: 0-100. (Default: 0)
++
++[[CongestionControlXoffClient]] **CongestionControlXoffClient** __NUM__::
++    DeltaTor extension: override the consensus cc_xoff_client, the client edge
++    outbuf size above which an XOFF pauses a stream. 0 uses the consensus
++    default. Valid range: 0-10000. (Default: 0)
++
++[[CongestionControlXoffExit]] **CongestionControlXoffExit** __NUM__::
++    DeltaTor extension: override the consensus cc_xoff_exit, the exit outbuf
++    XOFF threshold. 0 uses the consensus default. Valid range: 0-10000.
++    (Default: 0)
++
++[[CongestionControlXonChangePct]] **CongestionControlXonChangePct** __NUM__::
++    DeltaTor extension: override the consensus cc_xon_change_pct, the percent
++    change in drain rate needed to send an advisory XON. 0 uses the consensus
++    default. Valid range: 0-99. (Default: 0)
++
++[[CongestionControlXonRate]] **CongestionControlXonRate** __NUM__::
++    DeltaTor extension: override the consensus cc_xon_rate. 0 uses the
++    consensus default. Valid range: 0-5000. (Default: 0)
++
++[[CongestionControlXonEwmaCnt]] **CongestionControlXonEwmaCnt** __NUM__::
++    DeltaTor extension: override the consensus cc_xon_ewma_cnt, the N of the
++    EWMA used for the advisory drain rate. 0 uses the consensus default. Valid
++    range: 0-100. (Default: 0)
++
++[[CongestionControlVegasAlphaExit]] **CongestionControlVegasAlphaExit** __NUM__::
++    DeltaTor extension: override the consensus cc_vegas_alpha_exit, the Vegas
++    queue threshold below which the window is grown on exit circuits. 0 uses
++    the consensus default. Valid range: 0-1000. (Default: 0)
++
++[[CongestionControlVegasBetaExit]] **CongestionControlVegasBetaExit** __NUM__::
++    DeltaTor extension: override the consensus cc_vegas_beta_exit, the Vegas
++    threshold above which the window is reduced. 0 uses the consensus default.
++    Valid range: 0-1000. (Default: 0)
++
++[[CongestionControlVegasGammaExit]] **CongestionControlVegasGammaExit** __NUM__::
++    DeltaTor extension: override the consensus cc_vegas_gamma_exit. 0 uses the
++    consensus default. Valid range: 0-1000. (Default: 0)
++
++[[CongestionControlVegasDeltaExit]] **CongestionControlVegasDeltaExit** __NUM__::
++    DeltaTor extension: override the consensus cc_vegas_delta_exit, the Vegas
++    queue bound. 0 uses the consensus default. Valid range: 0-65535.
++    (Default: 0)
++
++[[CongestionControlVegasSsCapExit]] **CongestionControlVegasSsCapExit** __NUM__::
++    DeltaTor extension: override the consensus cc_sscap_exit, the slow-start
++    congestion-window cap for exit circuits. 0 uses the consensus default.
++    Valid range: 0-1000000. (Default: 0)
++
++[[CongestionControlVegasSsMax]] **CongestionControlVegasSsMax** __NUM__::
++    DeltaTor extension: override the consensus cc_ss_max, the slow-start
++    congestion-window cap. 0 uses the consensus default. Valid range:
++    0-1000000. (Default: 0)
++
++[[CongestionControlVegasCwndFullMinPct]] **CongestionControlVegasCwndFullMinPct** __NUM__::
++    DeltaTor extension: override the consensus cc_cwnd_full_minpct. 0 uses the
++    consensus default. Valid range: 0-100. (Default: 0)
++
++[[CongestionControlVegasCwndFullGap]] **CongestionControlVegasCwndFullGap** __NUM__::
++    DeltaTor extension: override the consensus cc_cwnd_full_gap. 0 uses the
++    consensus default. Valid range: 0-1000. (Default: 0)
++
++[[CongestionControlVegasCwndFullPerCwnd]] **CongestionControlVegasCwndFullPerCwnd** __NUM__::
++    DeltaTor extension: override the consensus cc_cwnd_full_per_cwnd. 0 uses
++    the consensus default. Valid range: 0-1. (Default: 0)
++
++[[MaxPendingTasksPerCPU]] **MaxPendingTasksPerCPU** __NUM__::
++    DeltaTor extension: override the consensus max_pending_tasks_per_cpu, the
++    maximum number of CPU-worker crypto tasks queued per CPU. 0 uses the
++    consensus default. Must be >= 0. (Default: 0)
++
++[[DirConsensusDiffMaxAge]] **DirConsensusDiffMaxAge** __NUM__::
++    DeltaTor extension: override the consensus
++    try-diff-for-consensus-newer-than, in hours, the maximum age for which the
++    client will request a consensus diff. 0 uses the consensus default. Valid
++    range: 0-8192. (Default: 0)
++
++[[HsDirSpreadFetch]] **HsDirSpreadFetch** __NUM__::
++    DeltaTor extension: override the consensus hsdir_spread_fetch, how many
++    HSDirs a client fetches a hidden-service descriptor from. 0 uses the
++    consensus default. Valid range: 0-128. (Default: 0)
++
++[[HsIntroNumExtra]] **HsIntroNumExtra** __NUM__::
++    DeltaTor extension: override the consensus hs_intro_num_extra, how many
++    extra introduction points a hidden service publishes. 0 uses the consensus
++    default. Valid range: 0-128. (Default: 0)
++
++[[GuardMaxSampleSize]] **GuardMaxSampleSize** __NUM__::
++    DeltaTor extension: override the consensus guard-max-sample-size, the
++    absolute cap on the sampled guard set. 0 uses the consensus default. Must
++    be >= 0. (Default: 0)
++
++[[GuardMinFilteredSampleSize]] **GuardMinFilteredSampleSize** __NUM__::
++    DeltaTor extension: override the consensus
++    guard-min-filtered-sample-size, the smallest acceptable filtered guard
++    sample. 0 uses the consensus default. Must be >= 0. (Default: 0)
++
++[[GuardMaxSampleThresholdPercent]] **GuardMaxSampleThresholdPercent** __NUM__::
++    DeltaTor extension: override the consensus
++    guard-max-sample-threshold-percent, the largest fraction of the network's
++    guards the sample may grow to. 0 uses the consensus default. Valid range:
++    0-100. (Default: 0)
++
+ [[ConnLimit]] **ConnLimit** __NUM__::
+     The minimum number of file descriptors that must be available to the Tor
+     process before it will start. Tor will ask the OS for as many file
+-- 
+2.56.0.windows.2
+

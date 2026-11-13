@@ -1,0 +1,121 @@
+From c0f9a76e80ed3f809670509144e5d2f6eda9fda9 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 20:50:27 +0330
+Subject: [PATCH 30/32] hs: expose hsdir_spread_fetch and hs_intro_num_extra as
+ torrc options
+
+---
+ src/app/config/config.c        | 10 ++++++++++
+ src/app/config/or_options_st.h | 11 +++++++++++
+ src/feature/hs/hs_common.c     | 17 +++++++++++++++--
+ src/feature/hs/hs_service.c    | 16 ++++++++++++++--
+ 4 files changed, 50 insertions(+), 4 deletions(-)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index 7832d87..687e210 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -543,6 +543,8 @@ static const config_var_t option_vars_[] = {
+   OBSOLETE("Group"),
+   V(GuardLifetime,               INTERVAL, "0 minutes"),
+   V(HeartbeatPeriod,             INTERVAL, "6 hours"),
++  V(HsDirSpreadFetch,            INT,      "0"),
++  V(HsIntroNumExtra,             INT,      "0"),
+   V(MainloopStats,               BOOL,     "0"),
+   V(HashedControlPassword,       LINELIST, NULL),
+   OBSOLETE("HidServDirectoryV2"),
+@@ -3272,6 +3274,14 @@ options_validate_scheduler(or_options_t *options, char **msg)
+            "8192 hours");
+   }
+ 
++  if (options->HsDirSpreadFetch < 0 || options->HsDirSpreadFetch > 128) {
++    REJECT("HsDirSpreadFetch must be between 0 (consensus default) and 128");
++  }
++
++  if (options->HsIntroNumExtra < 0 || options->HsIntroNumExtra > 128) {
++    REJECT("HsIntroNumExtra must be between 0 (consensus default) and 128");
++  }
++
+   /* Don't need to validate that the Interval is less than anything because
+    * zero is valid and all negative values are valid. */
+   if (options->KISTSchedRunInterval > KIST_SCHED_RUN_INTERVAL_MAX) {
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index 579d73b..0e448d9 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -326,6 +326,17 @@ struct or_options_t {
+   int FetchServerDescriptors; /**< Do we fetch server descriptors as normal? */
+   int FetchHidServDescriptors; /**< and hidden service descriptors? */
+ 
++  /** DeltaTor extension: override the consensus hsdir_spread_fetch, how many
++   * HSDirs a client fetches a hidden service descriptor from. 0 (default) keeps
++   * the consensus value (3). A higher value fetches from more HSDirs, making
++   * .onion connects faster and more reliable. */
++  int HsDirSpreadFetch;
++
++  /** DeltaTor extension: override the consensus hs_intro_num_extra, how many
++   * extra introduction points a hidden service publishes. 0 (default) keeps the
++   * consensus value (2). */
++  int HsIntroNumExtra;
++
+   int FetchUselessDescriptors; /**< Do we fetch non-running descriptors too? */
+   int AllDirActionsPrivate; /**< Should every directory action be sent
+                              * through a Tor circuit? */
+diff --git a/src/feature/hs/hs_common.c b/src/feature/hs/hs_common.c
+index 018bb10..2831151 100644
+--- a/src/feature/hs/hs_common.c
++++ b/src/feature/hs/hs_common.c
+@@ -1165,8 +1165,21 @@ int32_t
+ hs_get_hsdir_spread_fetch(void)
+ {
+   /* The [1,128] range is a specification requirement. */
+-  return networkstatus_get_param(NULL, "hsdir_spread_fetch",
+-                                 HS_DEFAULT_HSDIR_SPREAD_FETCH, 1, 128);
++  int32_t v = networkstatus_get_param(NULL, "hsdir_spread_fetch",
++                                      HS_DEFAULT_HSDIR_SPREAD_FETCH, 1, 128);
++
++  /* DeltaTor extension: the torrc HsDirSpreadFetch option (0 = consensus
++   * default) overrides the consensus hsdir_spread_fetch, so the client fetches
++   * a hidden service descriptor from more HSDirs (faster/more reliable .onion
++   * connects). */
++  {
++    const or_options_t *opts = get_options();
++    if (opts && opts->HsDirSpreadFetch > 0) {
++      v = opts->HsDirSpreadFetch;
++    }
++  }
++
++  return v;
+ }
+ 
+ /** Return the spread store value defined by a consensus parameter or the
+diff --git a/src/feature/hs/hs_service.c b/src/feature/hs/hs_service.c
+index 74d7d2a..6c5daaa 100644
+--- a/src/feature/hs/hs_service.c
++++ b/src/feature/hs/hs_service.c
+@@ -439,8 +439,20 @@ get_intro_point_num_extra(void)
+ {
+   /* The [0, 128] range bounds the number of extra introduction point allowed.
+    * Above 128 intro points, it's getting a bit crazy. */
+-  return networkstatus_get_param(NULL, "hs_intro_num_extra",
+-                                 NUM_INTRO_POINTS_EXTRA, 0, 128);
++  int32_t v = networkstatus_get_param(NULL, "hs_intro_num_extra",
++                                      NUM_INTRO_POINTS_EXTRA, 0, 128);
++
++  /* DeltaTor extension: the torrc HsIntroNumExtra option (0 = consensus
++   * default) overrides the consensus hs_intro_num_extra, so a hidden service
++   * publishes extra introduction points. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts && opts->HsIntroNumExtra > 0) {
++      v = opts->HsIntroNumExtra;
++    }
++  }
++
++  return v;
+ }
+ 
+ /** Helper: Function that needs to return 1 for the HT for each loop which
+-- 
+2.56.0.windows.2
+

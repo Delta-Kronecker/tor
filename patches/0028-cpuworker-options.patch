@@ -1,0 +1,77 @@
+From 3ed571fe28d930b1d43c0b9596323fea3275ab31 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 20:48:42 +0330
+Subject: [PATCH 28/32] cpuworker: expose max_pending_tasks_per_cpu as the
+ MaxPendingTasksPerCPU option
+
+---
+ src/app/config/config.c        |  5 +++++
+ src/app/config/or_options_st.h |  6 ++++++
+ src/core/mainloop/cpuworker.c  | 11 +++++++++++
+ 3 files changed, 22 insertions(+)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index bf0a18f..fef7315 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -706,6 +706,7 @@ static const config_var_t option_vars_[] = {
+   OBSOLETE("SchedulerMaxFlushCells__"),
+   V(KISTSchedRunInterval,        MSEC_INTERVAL, "0 msec"),
+   V(KISTSockBufSizeFactor,       DOUBLE,   "1.0"),
++  V(MaxPendingTasksPerCPU,       INT,      "0"),
+   V(Schedulers,                  CSV,      "KIST,KISTLite,Vanilla"),
+   V(ShutdownWaitLength,          INTERVAL, "30 seconds"),
+   OBSOLETE("SocksListenAddress"),
+@@ -3260,6 +3261,10 @@ options_validate_scheduler(or_options_t *options, char **msg)
+     REJECT("KISTSockBufSizeFactor must be at least 0");
+   }
+ 
++  if (options->MaxPendingTasksPerCPU < 0) {
++    REJECT("MaxPendingTasksPerCPU must be >= 0 (0 = consensus default)");
++  }
++
+   /* Don't need to validate that the Interval is less than anything because
+    * zero is valid and all negative values are valid. */
+   if (options->KISTSchedRunInterval > KIST_SCHED_RUN_INTERVAL_MAX) {
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index 3b54778..fa90638 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -1288,6 +1288,12 @@ struct or_options_t {
+   /** A multiplier for the KIST per-socket limit calculation. */
+   double KISTSockBufSizeFactor;
+ 
++  /** DeltaTor extension: override the consensus max_pending_tasks_per_cpu, the
++   * maximum number of CPU-worker (crypto) tasks queued per CPU. 0 (default)
++   * keeps the consensus value (64). A higher value builds many circuits (and
++   * their crypto handshakes) in parallel sooner, at the cost of extra CPU. */
++  int MaxPendingTasksPerCPU;
++
+   /** The list of scheduler type string ordered by priority that is first one
+    * has to be tried first. Default: KIST,KISTLite,Vanilla */
+   struct smartlist_t *Schedulers;
+diff --git a/src/core/mainloop/cpuworker.c b/src/core/mainloop/cpuworker.c
+index 23a9d89..e6157dc 100644
+--- a/src/core/mainloop/cpuworker.c
++++ b/src/core/mainloop/cpuworker.c
+@@ -89,6 +89,17 @@ get_max_pending_tasks_per_cpu(const networkstatus_t *ns)
+ #define MAX_PENDING_TASKS_PER_CPU_MIN 1
+ #define MAX_PENDING_TASKS_PER_CPU_MAX INT32_MAX
+ 
++  /* DeltaTor extension: the torrc MaxPendingTasksPerCPU option (0 = consensus
++   * default) overrides the consensus max_pending_tasks_per_cpu, letting more
++   * circuit-build/onion crypto tasks queue per CPU. A higher value builds many
++   * conflux circuits faster at the cost of extra CPU. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts && opts->MaxPendingTasksPerCPU > 0) {
++      return (uint32_t) opts->MaxPendingTasksPerCPU;
++    }
++  }
++
+   return networkstatus_get_param(ns, "max_pending_tasks_per_cpu",
+                                  MAX_PENDING_TASKS_PER_CPU_DEFAULT,
+                                  MAX_PENDING_TASKS_PER_CPU_MIN,
+-- 
+2.56.0.windows.2
+

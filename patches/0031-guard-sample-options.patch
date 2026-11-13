@@ -1,0 +1,148 @@
+From aeb36da66644a7752db2fa9957c2fa12f72d28ef Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 20:51:02 +0330
+Subject: [PATCH 31/32] entrynodes: expose guard sample size/threshold params
+ as torrc options
+
+---
+ src/app/config/config.c         | 17 ++++++++++++
+ src/app/config/or_options_st.h  | 16 ++++++++++++
+ src/feature/client/entrynodes.c | 46 ++++++++++++++++++++++++++++-----
+ 3 files changed, 73 insertions(+), 6 deletions(-)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index 687e210..84533d0 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -542,6 +542,9 @@ static const config_var_t option_vars_[] = {
+ #endif /* defined(_WIN32) */
+   OBSOLETE("Group"),
+   V(GuardLifetime,               INTERVAL, "0 minutes"),
++  V(GuardMaxSampleSize,          INT,      "0"),
++  V(GuardMinFilteredSampleSize,  INT,      "0"),
++  V(GuardMaxSampleThresholdPercent, INT,   "0"),
+   V(HeartbeatPeriod,             INTERVAL, "6 hours"),
+   V(HsDirSpreadFetch,            INT,      "0"),
+   V(HsIntroNumExtra,             INT,      "0"),
+@@ -3282,6 +3285,20 @@ options_validate_scheduler(or_options_t *options, char **msg)
+     REJECT("HsIntroNumExtra must be between 0 (consensus default) and 128");
+   }
+ 
++  if (options->GuardMaxSampleSize < 0) {
++    REJECT("GuardMaxSampleSize must be >= 0 (0 = consensus default)");
++  }
++
++  if (options->GuardMinFilteredSampleSize < 0) {
++    REJECT("GuardMinFilteredSampleSize must be >= 0 (0 = consensus default)");
++  }
++
++  if (options->GuardMaxSampleThresholdPercent < 0 ||
++      options->GuardMaxSampleThresholdPercent > 100) {
++    REJECT("GuardMaxSampleThresholdPercent must be between 0 (consensus "
++           "default) and 100");
++  }
++
+   /* Don't need to validate that the Interval is less than anything because
+    * zero is valid and all negative values are valid. */
+   if (options->KISTSchedRunInterval > KIST_SCHED_RUN_INTERVAL_MAX) {
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index 0e448d9..9762846 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -1233,6 +1233,22 @@ struct or_options_t {
+   /** How long (seconds) do we keep a guard before picking a new one? */
+   int GuardLifetime;
+ 
++  /** DeltaTor extension: override the consensus guard-max-sample-size, the
++   * absolute cap on how many guards we sample. 0 (default) keeps the consensus
++   * value (600). A larger sample lets us pick better/faster guards. */
++  int GuardMaxSampleSize;
++
++  /** DeltaTor extension: override the consensus guard-min-filtered-sample-size,
++   * the smallest filtered guard sample we accept. 0 (default) keeps the
++   * consensus value (20). */
++  int GuardMinFilteredSampleSize;
++
++  /** DeltaTor extension: override the consensus
++   * guard-max-sample-threshold-percent, the largest fraction (%) of the
++   * network's guards we let our sample grow to. 0 (default) keeps the consensus
++   * value (20). */
++  int GuardMaxSampleThresholdPercent;
++
+   /** Is this an exit node?  This is a tristate, where "1" means "yes, and use
+    * the default exit policy if none is given" and "0" means "no; exit policy
+    * is 'reject *'" and "auto" (-1) means "same as 1, but warn the user."
+diff --git a/src/feature/client/entrynodes.c b/src/feature/client/entrynodes.c
+index 34e4537..1c7dfe2 100644
+--- a/src/feature/client/entrynodes.c
++++ b/src/feature/client/entrynodes.c
+@@ -385,6 +385,17 @@ get_max_sample_threshold(void)
+     networkstatus_get_param(NULL, "guard-max-sample-threshold-percent",
+                             DFLT_MAX_SAMPLE_THRESHOLD_PERCENT,
+                             1, 100);
++
++  /* DeltaTor extension: the torrc GuardMaxSampleThresholdPercent option
++   * (0 = consensus default) overrides the consensus
++   * guard-max-sample-threshold-percent. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts && opts->GuardMaxSampleThresholdPercent > 0) {
++      pct = opts->GuardMaxSampleThresholdPercent;
++    }
++  }
++
+   return pct / 100.0;
+ }
+ /**
+@@ -393,9 +404,20 @@ get_max_sample_threshold(void)
+ STATIC int
+ get_max_sample_size_absolute(void)
+ {
+-  return (int) networkstatus_get_param(NULL, "guard-max-sample-size",
+-                                       DFLT_MAX_SAMPLE_SIZE,
+-                                       1, INT32_MAX);
++  int v = (int) networkstatus_get_param(NULL, "guard-max-sample-size",
++                                        DFLT_MAX_SAMPLE_SIZE,
++                                        1, INT32_MAX);
++
++  /* DeltaTor extension: the torrc GuardMaxSampleSize option (0 = consensus
++   * default) overrides the consensus guard-max-sample-size. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts && opts->GuardMaxSampleSize > 0) {
++      v = opts->GuardMaxSampleSize;
++    }
++  }
++
++  return v;
+ }
+ /**
+  * We always try to make our sample contain at least this many guards.
+@@ -403,9 +425,21 @@ get_max_sample_size_absolute(void)
+ STATIC int
+ get_min_filtered_sample_size(void)
+ {
+-  return networkstatus_get_param(NULL, "guard-min-filtered-sample-size",
+-                                 DFLT_MIN_FILTERED_SAMPLE_SIZE,
+-                                 1, INT32_MAX);
++  int v = networkstatus_get_param(NULL, "guard-min-filtered-sample-size",
++                                  DFLT_MIN_FILTERED_SAMPLE_SIZE,
++                                  1, INT32_MAX);
++
++  /* DeltaTor extension: the torrc GuardMinFilteredSampleSize option
++   * (0 = consensus default) overrides the consensus
++   * guard-min-filtered-sample-size. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts && opts->GuardMinFilteredSampleSize > 0) {
++      v = opts->GuardMinFilteredSampleSize;
++    }
++  }
++
++  return v;
+ }
+ /**
+  * If a guard is unlisted for this many days in a row, we remove it.
+-- 
+2.56.0.windows.2
+

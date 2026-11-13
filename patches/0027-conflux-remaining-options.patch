@@ -1,0 +1,96 @@
+From ce115d472fb5001e8bc05a2ae971e0a30f3494d5 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 20:47:58 +0330
+Subject: [PATCH 27/32] conflux: expose max unlinked leg retry and max legs set
+ as torrc options
+
+---
+ src/app/config/config.c        | 12 ++++++++++++
+ src/app/config/or_options_st.h | 12 ++++++++++++
+ src/core/or/conflux_params.c   | 17 +++++++++++++++++
+ 3 files changed, 41 insertions(+)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index 6c228ea..bf0a18f 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -394,6 +394,8 @@ static const config_var_t option_vars_[] = {
+   V(ConfluxDrainPct,             INT,      "0"),
+   V(ConfluxLowExitThreshold,     INT,      "0"),
+   V(ConfluxMaxOooqBytes,         INT,      "0"),
++  V(ConfluxMaxUnlinkedLegRetry,  INT,      "0"),
++  V(ConfluxMaxLegsSet,           INT,      "0"),
+   V(CircuitCellQueueHigh,        INT,      "0"),
+   V(CircuitCellQueueLow,         INT,      "0"),
+   V(OrConnHighWater,             INT,      "0"),
+@@ -3672,6 +3674,16 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+     REJECT("ConfluxMaxOooqBytes must be >= 0 (0 = consensus default)");
+   }
+ 
++  if (options->ConfluxMaxUnlinkedLegRetry < 0 ||
++      options->ConfluxMaxUnlinkedLegRetry > 255) {
++    REJECT("ConfluxMaxUnlinkedLegRetry must be between 0 (consensus default) "
++           "and 255");
++  }
++
++  if (options->ConfluxMaxLegsSet < 0 || options->ConfluxMaxLegsSet > 255) {
++    REJECT("ConfluxMaxLegsSet must be between 0 (consensus default) and 255");
++  }
++
+   if (options->CircuitCellQueueHigh < 0 ||
+       options->CircuitCellQueueHigh > 1000) {
+     REJECT("CircuitCellQueueHigh must be between 0 (consensus default) "
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index 1fce6f4..3b54778 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -814,6 +814,18 @@ struct or_options_t {
+    * value bounds memory at the cost of more set teardowns under reordering. */
+   int ConfluxMaxOooqBytes;
+ 
++  /** DeltaTor extension: override the consensus cfx_max_unlinked_leg_retry, how
++   * many times an unlinked leg may be retried before the set gives up. 0
++   * (default) keeps the consensus value (3). A higher value makes sets complete
++   * more reliably on flaky paths at the cost of extra circuit builds. */
++  int ConfluxMaxUnlinkedLegRetry;
++
++  /** DeltaTor extension: override the consensus cfx_max_legs_set, the maximum
++   * number of legs a set may link with. 0 (default) keeps the consensus value
++   * (8). This must be raised to be able to link more legs than the consensus
++   * allows (ConfluxNumLegs is clamped to this value). */
++  int ConfluxMaxLegsSet;
++
+   /** DeltaTor extension: override the consensus cellq_high, the circuit cell
+    * queue high watermark in cells. It tells us when a circuit's channel
+    * outbound queue is full. 0 (default) keeps the consensus value (256). A
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index 464fab7..428494a 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -378,6 +378,23 @@ conflux_params_new_consensus(const networkstatus_t *ns)
+                             MAX_LEGS_SET_DEFAULT,
+                             MAX_LEGS_SET_MIN, MAX_LEGS_SET_MAX);
+ 
++  /* DeltaTor extension: the torrc ConfluxMaxUnlinkedLegRetry / ConfluxMaxLegsSet
++   * options (0 = consensus default) override the consensus
++   * cfx_max_unlinked_leg_retry / cfx_max_legs_set values. This must run before
++   * the leg-count clamp below so a raised ConfluxMaxLegsSet actually takes
++   * effect. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts) {
++      if (opts->ConfluxMaxUnlinkedLegRetry > 0) {
++        max_unlinked_leg_retry = (uint32_t) opts->ConfluxMaxUnlinkedLegRetry;
++      }
++      if (opts->ConfluxMaxLegsSet > 0) {
++        max_legs_set = (uint8_t) opts->ConfluxMaxLegsSet;
++      }
++    }
++  }
++
+   /* DeltaTor extension: a set can never link with more legs than
+    * cfx_max_legs_set allows (the Exit enforces the same cap while linking), so
+    * clamp the requested number of legs to the maximum. Without this, a
+-- 
+2.56.0.windows.2
+

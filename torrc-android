@@ -42,15 +42,14 @@ MaxClientCircuitsPending 256
 CircuitPriorityHalflife 5
 SocksTimeout 30
 
-# Keep a small pool of ready conflux sets. Restrict new streams to the fastest
-# ConfluxSetRttPct% of candidate sets (17% keeps just the single fastest set
-# with the default pool of 8), then use the fewest-streams policy across those
-# to balance load.
-ConfluxNumSets 8
-ConfluxNumLinkedSets 8
-ConfluxNumLegs 3
+# Keep a pool of ready conflux sets. Restrict new streams to the fastest
+# ConfluxSetRttPct% of candidate sets (33% keeps about 3 sets with the 12-set
+# pool), then use the fewest-streams policy across those to balance load.
+ConfluxNumSets 12
+ConfluxNumLinkedSets 12
+ConfluxNumLegs 4
 ConfluxSetSelection 2
-ConfluxSetRttPct 17
+ConfluxSetRttPct 33
 # With more than two legs per set (ConfluxNumLegs above), upstream's conflux
 # scheduler wants cfx_drain_pct 100 so a leg can be switched away from as soon
 # as its in-flight data drains; otherwise switching is blocked.
@@ -63,25 +62,59 @@ ConfluxLowExitThreshold 1
 # DeltaTor speed tuning: buffers. Keep more cells queued per circuit and per OR
 # connection so high-latency links stay busy instead of going idle between
 # scheduler runs (costs memory).
-CircuitCellQueueHigh 512
+CircuitCellQueueHigh 1024
 CircuitCellQueueLow 64
-OrConnHighWater 65536
+OrConnHighWater 262144
 OrConnLowWater 32768
 
-# DeltaTor speed tuning: congestion window. Start with a bigger window and grow
-# it faster so uploads ramp up sooner.
+# DeltaTor speed tuning: congestion window. Start with a bigger window, grow it
+# faster and never let it collapse, so uploads ramp up sooner.
 CongestionControlCwndInit 300
 CongestionControlCwndInc 2
 CongestionControlCwndIncPctSs 300
 CongestionControlCwndIncRate 62
+CongestionControlCwndMin 300
 
-# DeltaTor speed tuning: start bandwidth (BDP) estimation sooner.
-CongestionControlBweMin 2
+# DeltaTor speed tuning: start bandwidth (BDP) estimation sooner and smooth it
+# with more congestion windows of acks so the estimate reacts faster.
+CongestionControlBweMin 1
+CongestionControlEwmaCwndPct 70
+CongestionControlEwmaMax 15
 
 # DeltaTor speed tuning: let the client buffer more downloaded data before
-# pausing a stream, which helps bulk download throughput.
+# pausing a stream, which helps bulk download throughput, and re-open the flow
+# after smaller drain-rate improvements.
 CongestionControlXoffClient 1000
+CongestionControlXonChangePct 15
+
+# DeltaTor speed tuning: send the first application data optimistically with the
+# circuit-create/SOCKS-connect request, saving a round trip per stream.
+OptimisticData 1
 
 # DeltaTor speed tuning: allow more in-flight data to sit in the kernel socket
-# buffer (3 congestion windows instead of 2).
-KISTSockBufSizeFactor 2.0
+# buffer (5 congestion windows instead of 2).
+KISTSockBufSizeFactor 4.0
+
+# --- DeltaTor phase 1: code-patch options ---
+# Vegas congestion-control thresholds on exit circuits. Larger alpha/beta/gamma
+# let the window grow further before backing off, raising throughput at the cost
+# of queueing (bufferbloat) and memory. 0 = consensus default.
+CongestionControlVegasAlphaExit 230
+CongestionControlVegasBetaExit 300
+CongestionControlVegasGammaExit 230
+CongestionControlVegasDeltaExit 380
+CongestionControlVegasSsMax 8192
+CongestionControlVegasCwndFullMinPct 20
+CongestionControlVegasCwndFullGap 8
+# Give up on an unlinked leg later so sets complete more reliably.
+ConfluxMaxUnlinkedLegRetry 5
+# Queue more circuit-build crypto tasks per CPU so the set pool fills faster.
+MaxPendingTasksPerCPU 128
+# Request consensus diffs for older consensuses => smaller directory fetches.
+DirConsensusDiffMaxAge 168
+
+# --- DeltaTor phase 1: onion + guard ---
+HsDirSpreadFetch 6
+HsIntroNumExtra 2
+GuardMaxSampleSize 1200
+GuardMinFilteredSampleSize 30

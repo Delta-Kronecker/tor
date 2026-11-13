@@ -1,0 +1,81 @@
+From 3d2883da25976962922f94b180c67af04146885b Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 20:49:37 +0330
+Subject: [PATCH 29/32] dirclient: expose try-diff-for-consensus-newer-than as
+ DirConsensusDiffMaxAge
+
+---
+ src/app/config/config.c           |  7 +++++++
+ src/app/config/or_options_st.h    |  7 +++++++
+ src/feature/dirclient/dirclient.c | 12 ++++++++++++
+ 3 files changed, 26 insertions(+)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index fef7315..7832d87 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -466,6 +466,7 @@ static const config_var_t option_vars_[] = {
+    * an order of magnitude, so there isn't too much load shifting to
+    * authorities when fallbacks go down. */
+   V(DirAuthorityFallbackRate,    DOUBLE,   "0.1"),
++  V(DirConsensusDiffMaxAge,      INT,      "0"),
+   V_IMMUTABLE(DisableAllSwap,    BOOL,     "0"),
+   V_IMMUTABLE(DisableDebuggerAttachment,   BOOL,     "1"),
+   OBSOLETE("DisableIOCP"),
+@@ -3265,6 +3266,12 @@ options_validate_scheduler(or_options_t *options, char **msg)
+     REJECT("MaxPendingTasksPerCPU must be >= 0 (0 = consensus default)");
+   }
+ 
++  if (options->DirConsensusDiffMaxAge < 0 ||
++      options->DirConsensusDiffMaxAge > 8192) {
++    REJECT("DirConsensusDiffMaxAge must be between 0 (consensus default) and "
++           "8192 hours");
++  }
++
+   /* Don't need to validate that the Interval is less than anything because
+    * zero is valid and all negative values are valid. */
+   if (options->KISTSchedRunInterval > KIST_SCHED_RUN_INTERVAL_MAX) {
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index fa90638..579d73b 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -491,6 +491,13 @@ struct or_options_t {
+    * along with fallbackdirs */
+   double DirAuthorityFallbackRate;
+ 
++  /** DeltaTor extension: override the consensus
++   * try-diff-for-consensus-newer-than value, in hours. 0 (default) keeps the
++   * consensus value (72h). A higher value lets the client request consensus
++   * diffs for older consensuses, producing smaller directory fetches and a
++   * faster consensus refresh. */
++  int DirConsensusDiffMaxAge;
++
+   /** If set, use these main (currently v3) directory authorities and
+    * not the default ones. */
+   struct config_line_t *AlternateDirAuthority;
+diff --git a/src/feature/dirclient/dirclient.c b/src/feature/dirclient/dirclient.c
+index bc3061e..5669a2f 100644
+--- a/src/feature/dirclient/dirclient.c
++++ b/src/feature/dirclient/dirclient.c
+@@ -411,6 +411,18 @@ dir_consensus_request_set_additional_headers(directory_request_t *req,
+                             MIN_TRY_DIFF_FOR_CONSENSUS_NEWER,
+                             MAX_TRY_DIFF_FOR_CONSENSUS_NEWER);
+ 
++  /* DeltaTor extension: the torrc DirConsensusDiffMaxAge option (in hours;
++   * 0 = consensus default, currently 72h) overrides the consensus
++   * try-diff-for-consensus-newer-than value. A higher value lets the client
++   * request consensus diffs more often, which means smaller directory fetches
++   * and a faster consensus refresh. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts && opts->DirConsensusDiffMaxAge > 0) {
++      max_age_for_diff = 3600 * opts->DirConsensusDiffMaxAge;
++    }
++  }
++
+   if (flav != -1) {
+     /* IF we have a parsed consensus of this type, we can do an
+      * if-modified-time based on it. */
+-- 
+2.56.0.windows.2
+

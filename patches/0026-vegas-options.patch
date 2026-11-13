@@ -1,0 +1,210 @@
+From 534aba5f57fcdcd3b4120d04b042f6be33761cd7 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Fri, 13 Nov 2026 20:42:59 +0330
+Subject: [PATCH 26/32] congestion: expose Vegas (cc_vegas_*) parameters as
+ torrc options
+
+---
+ src/app/config/config.c                | 63 ++++++++++++++++++++++++++
+ src/app/config/or_options_st.h         | 47 +++++++++++++++++++
+ src/core/or/congestion_control_vegas.c | 38 ++++++++++++++++
+ 3 files changed, 148 insertions(+)
+
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index 883616d..6c228ea 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -413,6 +413,15 @@ static const config_var_t option_vars_[] = {
+   V(CongestionControlXonChangePct, INT,    "0"),
+   V(CongestionControlXonRate,    INT,      "0"),
+   V(CongestionControlXonEwmaCnt, INT,      "0"),
++  V(CongestionControlVegasAlphaExit, INT,  "0"),
++  V(CongestionControlVegasBetaExit, INT,   "0"),
++  V(CongestionControlVegasGammaExit, INT,  "0"),
++  V(CongestionControlVegasDeltaExit, INT,  "0"),
++  V(CongestionControlVegasSsCapExit, INT,  "0"),
++  V(CongestionControlVegasSsMax,    INT,   "0"),
++  V(CongestionControlVegasCwndFullMinPct, INT, "0"),
++  V(CongestionControlVegasCwndFullGap, INT, "0"),
++  V(CongestionControlVegasCwndFullPerCwnd, INT, "0"),
+   V(ConnLimit,                   POSINT,     "1000"),
+   V(ConnDirectionStatistics,     BOOL,     "0"),
+   V(ConstrainedSockets,          BOOL,     "0"),
+@@ -3768,6 +3777,60 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+            "and 100");
+   }
+ 
++  if (options->CongestionControlVegasAlphaExit < 0 ||
++      options->CongestionControlVegasAlphaExit > 1000) {
++    REJECT("CongestionControlVegasAlphaExit must be between 0 (consensus "
++           "default) and 1000");
++  }
++
++  if (options->CongestionControlVegasBetaExit < 0 ||
++      options->CongestionControlVegasBetaExit > 1000) {
++    REJECT("CongestionControlVegasBetaExit must be between 0 (consensus "
++           "default) and 1000");
++  }
++
++  if (options->CongestionControlVegasGammaExit < 0 ||
++      options->CongestionControlVegasGammaExit > 1000) {
++    REJECT("CongestionControlVegasGammaExit must be between 0 (consensus "
++           "default) and 1000");
++  }
++
++  if (options->CongestionControlVegasDeltaExit < 0 ||
++      options->CongestionControlVegasDeltaExit > 65535) {
++    REJECT("CongestionControlVegasDeltaExit must be between 0 (consensus "
++           "default) and 65535");
++  }
++
++  if (options->CongestionControlVegasSsCapExit < 0 ||
++      options->CongestionControlVegasSsCapExit > 1000000) {
++    REJECT("CongestionControlVegasSsCapExit must be between 0 (consensus "
++           "default) and 1000000");
++  }
++
++  if (options->CongestionControlVegasSsMax < 0 ||
++      options->CongestionControlVegasSsMax > 1000000) {
++    REJECT("CongestionControlVegasSsMax must be between 0 (consensus default) "
++           "and 1000000");
++  }
++
++  if (options->CongestionControlVegasCwndFullMinPct < 0 ||
++      options->CongestionControlVegasCwndFullMinPct > 100) {
++    REJECT("CongestionControlVegasCwndFullMinPct must be between 0 (consensus "
++           "default) and 100");
++  }
++
++  if (options->CongestionControlVegasCwndFullGap < 0 ||
++      options->CongestionControlVegasCwndFullGap > 1000) {
++    REJECT("CongestionControlVegasCwndFullGap must be between 0 (consensus "
++           "default) and 1000");
++  }
++
++  if (options->CongestionControlVegasCwndFullPerCwnd < 0 ||
++      options->CongestionControlVegasCwndFullPerCwnd > 1) {
++    REJECT("CongestionControlVegasCwndFullPerCwnd must be 0 (consensus "
++           "default) or 1");
++  }
++
+   if (options_validate_publish_server(old_options, options, msg) < 0)
+     return -1;
+ 
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index 59a4f49..1fce6f4 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -917,6 +917,53 @@ struct or_options_t {
+    * value (2). */
+   int CongestionControlXonEwmaCnt;
+ 
++  /** DeltaTor extension: override the consensus cc_vegas_alpha_exit, the Vegas
++   * queue threshold (in cells) below which the window is grown. 0 (default)
++   * keeps the consensus value (3*OUTBUF_CELLS). A larger value lets the window
++   * grow further before backing off, which raises throughput on high-latency
++   * paths at the cost of queueing (bufferbloat). */
++  int CongestionControlVegasAlphaExit;
++
++  /** DeltaTor extension: override the consensus cc_vegas_beta_exit, the Vegas
++   * threshold above which the window is reduced. 0 (default) keeps the
++   * consensus value (4*OUTBUF_CELLS). */
++  int CongestionControlVegasBetaExit;
++
++  /** DeltaTor extension: override the consensus cc_vegas_gamma_exit, the Vegas
++   * threshold used when the window is reduced. 0 (default) keeps the consensus
++   * value (3*OUTBUF_CELLS). */
++  int CongestionControlVegasGammaExit;
++
++  /** DeltaTor extension: override the consensus cc_vegas_delta_exit, the Vegas
++   * queue bound above which the window is reduced more aggressively. 0
++   * (default) keeps the consensus value (5*OUTBUF_CELLS). */
++  int CongestionControlVegasDeltaExit;
++
++  /** DeltaTor extension: override the consensus cc_sscap_exit, the slow-start
++   * congestion-window cap for exit circuits. 0 (default) keeps the consensus
++   * value (600). */
++  int CongestionControlVegasSsCapExit;
++
++  /** DeltaTor extension: override the consensus cc_ss_max, the slow-start
++   * congestion-window cap used when the slow-start cap parameter is above the
++   * maximum window. 0 (default) keeps the consensus value (5000). */
++  int CongestionControlVegasSsMax;
++
++  /** DeltaTor extension: override the consensus cc_cwnd_full_minpct, the
++   * inflight percent of cwnd below which a circuit is considered not full.
++   * 0 (default) keeps the consensus value (25). */
++  int CongestionControlVegasCwndFullMinPct;
++
++  /** DeltaTor extension: override the consensus cc_cwnd_full_gap, the number of
++   * SENDME increments of headroom treated as "cwnd full". 0 (default) keeps the
++   * consensus value (4). */
++  int CongestionControlVegasCwndFullGap;
++
++  /** DeltaTor extension: override the consensus cc_cwnd_full_per_cwnd, whether
++   * cwnd_full is reset once per congestion window (1) or once per SENDME (0).
++   * 0 (default) keeps the consensus value (1). */
++  int CongestionControlVegasCwndFullPerCwnd;
++
+   /** The length of time that we think a consensus should be fresh. */
+   int V3AuthVotingInterval;
+   /** The length of time we think it will take to distribute votes. */
+diff --git a/src/core/or/congestion_control_vegas.c b/src/core/or/congestion_control_vegas.c
+index af1ffa9..5682884 100644
+--- a/src/core/or/congestion_control_vegas.c
++++ b/src/core/or/congestion_control_vegas.c
+@@ -11,6 +11,7 @@
+ 
+ #include "core/or/or.h"
+ 
++#include "app/config/config.h"
+ #include "core/or/crypt_path.h"
+ #include "core/or/or_circuit_st.h"
+ #include "core/or/sendme.h"
+@@ -210,6 +211,43 @@ congestion_control_vegas_set_params(congestion_control_t *cc,
+       VEGAS_CWND_FULL_PER_CWND_DFLT,
+       0,
+       1);
++
++  /* DeltaTor extension: the torrc Vegas options (0 = consensus default)
++   * override the consensus cc_vegas_* / cc_sscap_exit / cc_ss_max and
++   * cc_cwnd_full_* values for exit circuits. Larger alpha/beta let the
++   * congestion window grow further before backing off, raising throughput at
++   * the cost of queueing (bufferbloat) and memory. */
++  {
++    const or_options_t *opts = get_options();
++    if (opts) {
++      if (path == CC_PATH_EXIT) {
++        if (opts->CongestionControlVegasAlphaExit > 0)
++          cc->vegas_params.alpha =
++            (uint16_t) opts->CongestionControlVegasAlphaExit;
++        if (opts->CongestionControlVegasBetaExit > 0)
++          cc->vegas_params.beta =
++            (uint16_t) opts->CongestionControlVegasBetaExit;
++        if (opts->CongestionControlVegasGammaExit > 0)
++          cc->vegas_params.gamma =
++            (uint16_t) opts->CongestionControlVegasGammaExit;
++        if (opts->CongestionControlVegasDeltaExit > 0)
++          cc->vegas_params.delta =
++            (uint16_t) opts->CongestionControlVegasDeltaExit;
++        if (opts->CongestionControlVegasSsCapExit > 0)
++          cc->vegas_params.ss_cwnd_cap =
++            (uint32_t) opts->CongestionControlVegasSsCapExit;
++      }
++      if (opts->CongestionControlVegasSsMax > 0)
++        cc->vegas_params.ss_cwnd_max =
++          (uint32_t) opts->CongestionControlVegasSsMax;
++      if (opts->CongestionControlVegasCwndFullMinPct > 0)
++        cc_vegas_cwnd_full_minpct = opts->CongestionControlVegasCwndFullMinPct;
++      if (opts->CongestionControlVegasCwndFullGap > 0)
++        cc_vegas_cwnd_full_gap = opts->CongestionControlVegasCwndFullGap;
++      if (opts->CongestionControlVegasCwndFullPerCwnd > 0)
++        cc_cwnd_full_per_cwnd = opts->CongestionControlVegasCwndFullPerCwnd;
++    }
++  }
+ }
+ 
+ /**
+-- 
+2.56.0.windows.2
+
