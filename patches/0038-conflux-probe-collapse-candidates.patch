@@ -1,0 +1,129 @@
+From 1d8639d04fcfb02bfa85219feb9f70c1274700bb Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Wed, 18 Nov 2026 18:30:10 +0330
+Subject: [PATCH] conflux: collapse unchanged candidate tables in
+ ConfluxProbeLog
+
+A pick printed one line per candidate set, so a busy client wrote 4-6 lines
+for every stream it placed even though the table almost never changed between
+picks. That was the main reason a five-minute level-2 capture already reached
+430 KB.
+
+Keep a digest of the last printed table (set id and measured bps, in order)
+and, while it is unchanged, replace the per-set lines with a single
+"candidates unchanged" line that carries the set count, the digest and how
+many consecutive picks reused the table. The full table is printed again as
+soon as a set joins or leaves, or any set's estimate changes.
+---
+ doc/DELTATOR-CHANGES.md    |  2 +-
+ doc/man/tor.1.txt          |  9 ++++---
+ src/core/or/conflux_pool.c | 52 +++++++++++++++++++++++++++++++++-----
+ 3 files changed, 53 insertions(+), 10 deletions(-)
+
+diff --git a/doc/DELTATOR-CHANGES.md b/doc/DELTATOR-CHANGES.md
+index 2e6effb..0f92357 100644
+--- a/doc/DELTATOR-CHANGES.md
++++ b/doc/DELTATOR-CHANGES.md
+@@ -19,7 +19,7 @@ All options are validated in `src/app/config/config.c` and documented in
+ | `ConfluxSetRttPct` | 0-100 % | Restrict new streams to the best N% of sets by RTT (keeps at least one set) |
+ | `ConfluxProbeInterval` | 0-3600 s | Measurement window for `ConfluxSetSelection 4`; every window all sets' real download throughput is re-estimated over the time each set actually moved bytes (0 = 30 s) |
+ | `ConfluxProbeMinBytes` | >= 0 bytes | Minimum delivered bytes per window before a set's throughput estimate is trusted (0 = 32768) |
+-| `ConfluxProbeLog` | 0-3 | Diagnostics for the measured-throughput selection: 0 = off, 1 = log the mechanism, 2 = log only the mechanism (suppress tor's other log lines; errors kept), 3 = quiet: only a summary line per minute |
++| `ConfluxProbeLog` | 0-3 | Diagnostics for the measured-throughput selection: 0 = off, 1 = log the mechanism (unchanged candidate tables are collapsed to one line), 2 = log only the mechanism (suppress tor's other log lines; errors kept), 3 = quiet: only a summary line per minute |
+ | `ConfluxDrainPct` | 0-255 | Leg drain percent before a leg switch is allowed; 100 lets a leg be swapped as soon as its in-flight data drains |
+ | `ConfluxLowExitThreshold` | 0-100 % | Exit-support ratio below which only one prebuilt set is built; 1 keeps the full ConfluxNumSets pool |
+ | `ConfluxMaxOooqBytes` | >= 0 bytes | Max bytes buffered per conflux out-of-order queue before the set is closed (0 = consensus default) |
+diff --git a/doc/man/tor.1.txt b/doc/man/tor.1.txt
+index 2af9817..07b18c7 100644
+--- a/doc/man/tor.1.txt
++++ b/doc/man/tor.1.txt
+@@ -444,9 +444,12 @@ forward slash (/) in the configuration file and on the command line.
+     In levels 2 and 3 the lines that tor buffers during startup are filtered
+     too, so the log file starts directly with the mechanism output. Roll lines
+     report both the full window (|elapsed|) and the part of it during which the
+-    set delivered bytes (|active|); only |active| is used for the estimate. The
+-    mechanism lines use the "confluxmthr" logging domain, so they can also be
+-    selected per target, for example with
++    set delivered bytes (|active|); only |active| is used for the estimate.
++    Candidate tables are printed only when they change: while the same sets
++    keep the same measured throughput, one "candidates unchanged" line per pick
++    replaces the per-set lines, which keeps a busy log readable. The mechanism
++    lines use the "confluxmthr" logging domain, so they can also be selected
++    per target, for example with
+     "Log [confluxmthr]notice file conflux-probe.log". Valid range: 0-3.
+     (Default: 0)
+ 
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index 5577ecf..cbb22ec 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1547,6 +1547,31 @@ conflux_mthr_detailed_logs(int probe_log)
+   return probe_log == 1 || probe_log == 2;
+ }
+ 
++/** DeltaTor extension: state used to collapse repeated "candidate" lines.
++ * Printing every candidate on every pick was what made levels 1 and 2 so
++ * large; while the table (set ids and measured throughput) is unchanged one
++ * line per pick carries the same information. */
++static struct {
++  bool valid;
++  uint64_t digest;
++  int n;
++  uint64_t repeats;
++} conflux_mthr_table;
++
++/** DeltaTor extension: cheap digest of a candidate table (set id and measured
++ * bps, in order). Only used to detect "nothing changed since the last pick";
++ * a collision would just postpone one table print until the next change. */
++static uint64_t
++conflux_mthr_table_digest(const smartlist_t *cands)
++{
++  uint64_t h = UINT64_C(1469598103934665603);
++  SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++    h = (h ^ c->cfx->mthr_id) * UINT64_C(1099511628211);
++    h = (h ^ c->cfx->mthr_bps) * UINT64_C(1099511628211);
++  } SMARTLIST_FOREACH_END(c);
++  return h;
++}
++
+ /** DeltaTor extension: record that the given set delivered payload bytes right
+  * now. Called from the data path (once per delivered relay cell) so the
+  * measured-throughput probe can tell how long a set was really busy instead of
+@@ -1824,13 +1849,28 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance,
+       const uint64_t r = crypto_rand_uint64(total);
+ 
+       if (conflux_mthr_detailed_logs(probe_log)) {
+-        SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++        const uint64_t digest = conflux_mthr_table_digest(cands);
++        if (conflux_mthr_table.valid &&
++            digest == conflux_mthr_table.digest &&
++            conflux_mthr_table.n == n) {
++          conflux_mthr_table.repeats++;
+           log_notice(LD_CONFLUXMTHR,
+-                     "ConfluxProbe candidate set#%"PRIu64" bps=%"PRIu64"B/s "
+-                     "weight=%"PRIu64,
+-                     c->cfx->mthr_id, c->cfx->mthr_bps,
+-                     c->cfx->mthr_bps + floor);
+-        } SMARTLIST_FOREACH_END(c);
++                     "ConfluxProbe candidates unchanged: sets=%d digest=%"
++                     PRIu64 " repeated=%"PRIu64,
++                     n, digest, conflux_mthr_table.repeats);
++        } else {
++          SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++            log_notice(LD_CONFLUXMTHR,
++                       "ConfluxProbe candidate set#%"PRIu64" bps=%"PRIu64"B/s "
++                       "weight=%"PRIu64,
++                       c->cfx->mthr_id, c->cfx->mthr_bps,
++                       c->cfx->mthr_bps + floor);
++          } SMARTLIST_FOREACH_END(c);
++          conflux_mthr_table.valid = true;
++          conflux_mthr_table.digest = digest;
++          conflux_mthr_table.n = n;
++          conflux_mthr_table.repeats = 0;
++        }
+         log_notice(LD_CONFLUXMTHR,
+                    "ConfluxProbe pick: candidates=%d max_bps=%"PRIu64"B/s "
+                    "floor=%"PRIu64" total_weight=%"PRIu64" roll=%"PRIu64,
+-- 
+2.56.0.windows.2
+

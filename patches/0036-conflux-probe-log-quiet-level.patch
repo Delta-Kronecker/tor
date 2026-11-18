@@ -1,0 +1,411 @@
+From 5ba30e6dd8bd042cd9f6229f9cfcf99409565f0c Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Wed, 18 Nov 2026 18:23:17 +0330
+Subject: [PATCH 36/38] conflux: add a quiet ConfluxProbeLog level and stop the
+ startup leak
+
+ConfluxProbeLog gained a third, quiet level, and two defects found while
+analysing a real Windows probe log are fixed.
+
+Level 3 keeps level 2's suppression of tor's own log lines but replaces the
+per-event mechanism lines (window opens, rolls, candidate tables, picks) with
+a single summary line per minute: window/roll/trusted/decayed counters, the
+number of picks, the fastest candidate, the floor, the total weight, how many
+candidates are still at zero and the set chosen last. Like the rest of the
+probe it is emitted lazily when a stream is placed, so an idle client writes
+nothing. This makes the diagnostics usable for long runs: level 2 produced
+roughly 6.7 MB per 1000 picks in the captured log.
+
+The 16 startup lines that still appeared at the top of a level-2 log were the
+messages tor buffers before the Log targets exist and then replays once they
+do. The replay in flush_log_messages_from_startup() bypasses logv(), so it did
+not see the filter; apply the same filter there. Levels 2 and 3 log files now
+start directly with mechanism output.
+
+The log filter is now a level instead of a boolean, so
+log_set_conflux_mthr_only() becomes log_set_conflux_mthr_level() and the
+config code passes the option through unchanged (validated as 0-3).
+---
+ doc/DELTATOR-CHANGES.md        |  2 +-
+ doc/man/tor.1.txt              | 12 +++--
+ src/app/config/config.c        | 16 +++---
+ src/app/config/or_options_st.h |  8 +--
+ src/core/or/conflux_params.c   |  3 +-
+ src/core/or/conflux_pool.c     | 94 +++++++++++++++++++++++++++++++---
+ src/lib/log/log.c              | 50 +++++++++++++-----
+ src/lib/log/log.h              | 15 +++---
+ 8 files changed, 159 insertions(+), 41 deletions(-)
+
+diff --git a/doc/DELTATOR-CHANGES.md b/doc/DELTATOR-CHANGES.md
+index fb2b675..d9eaafa 100644
+--- a/doc/DELTATOR-CHANGES.md
++++ b/doc/DELTATOR-CHANGES.md
+@@ -19,7 +19,7 @@ All options are validated in `src/app/config/config.c` and documented in
+ | `ConfluxSetRttPct` | 0-100 % | Restrict new streams to the best N% of sets by RTT (keeps at least one set) |
+ | `ConfluxProbeInterval` | 0-3600 s | Measurement window for `ConfluxSetSelection 4`; every window all sets' real download throughput is re-estimated (0 = 30 s) |
+ | `ConfluxProbeMinBytes` | >= 0 bytes | Minimum delivered bytes per window before a set's throughput estimate is trusted (0 = 32768) |
+-| `ConfluxProbeLog` | 0-2 | Diagnostics for the measured-throughput selection: 0 = off, 1 = log the mechanism, 2 = log only the mechanism (suppress tor's other log lines; errors kept) |
++| `ConfluxProbeLog` | 0-3 | Diagnostics for the measured-throughput selection: 0 = off, 1 = log the mechanism, 2 = log only the mechanism (suppress tor's other log lines; errors kept), 3 = quiet: only a summary line per minute |
+ | `ConfluxDrainPct` | 0-255 | Leg drain percent before a leg switch is allowed; 100 lets a leg be swapped as soon as its in-flight data drains |
+ | `ConfluxLowExitThreshold` | 0-100 % | Exit-support ratio below which only one prebuilt set is built; 1 keeps the full ConfluxNumSets pool |
+ | `ConfluxMaxOooqBytes` | >= 0 bytes | Max bytes buffered per conflux out-of-order queue before the set is closed (0 = consensus default) |
+diff --git a/doc/man/tor.1.txt b/doc/man/tor.1.txt
+index aceb236..d3114c2 100644
+--- a/doc/man/tor.1.txt
++++ b/doc/man/tor.1.txt
+@@ -434,9 +434,15 @@ forward slash (/) in the configuration file and on the command line.
+     (measurement windows, per-set throughput, candidate weights and the set it
+     picks) alongside tor's own log lines, 2 = log the same mechanism lines but
+     suppress all other tor log lines (errors are still shown), so the mechanism
+-    can be verified in isolation. The mechanism lines use the "confluxmthr"
+-    logging domain, so they can also be selected per target, for example with
+-    "Log [confluxmthr]notice file conflux-probe.log". Valid range: 0-2.
++    can be verified in isolation, 3 = quiet mode: all other tor log lines are
++    suppressed as in level 2 and the per-event mechanism lines are replaced by a
++    single summary line per minute (window and roll counters, the fastest
++    candidate, the floor, the total weight and the last set chosen).
++    In levels 2 and 3 the lines that tor buffers during startup are filtered
++    too, so the log file starts directly with the mechanism output. The
++    mechanism lines use the "confluxmthr" logging domain, so they can also be
++    selected per target, for example with
++    "Log [confluxmthr]notice file conflux-probe.log". Valid range: 0-3.
+     (Default: 0)
+ 
+ [[ConfluxDrainPct]] **ConfluxDrainPct** __NUM__::
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index c3eb3b7..f3c5829 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -3715,10 +3715,11 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+            "and 100000000 bytes");
+   }
+ 
+-  if (options->ConfluxProbeLog < 0 || options->ConfluxProbeLog > 2) {
++  if (options->ConfluxProbeLog < 0 || options->ConfluxProbeLog > 3) {
+     REJECT("ConfluxProbeLog must be 0 (off), 1 (log the measured-throughput "
+-           "set-selection mechanism alongside tor's own logs) or 2 (log only "
+-           "the mechanism and suppress tor's own log lines)");
++           "set-selection mechanism alongside tor's own logs), 2 (log only "
++           "the mechanism and suppress tor's own log lines) or 3 (quiet: only "
++           "one summary line per minute, everything else suppressed)");
+   }
+ 
+   if (options->ConfluxDrainPct < 0 || options->ConfluxDrainPct > 255) {
+@@ -5314,11 +5315,12 @@ options_init_logs(const or_options_t *old_options, const or_options_t *options,
+   if (options_init_log_granularity(options, validate_only) < 0)
+     return -1;
+ 
+-  /* DeltaTor extension: ConfluxProbeLog 2 makes logv() drop every line that is
+-   * not from the conflux measured-throughput mechanism. Only change the global
+-   * log state when we are really applying the options, not while validating. */
++  /* DeltaTor extension: ConfluxProbeLog 2 and 3 make logv() drop every line
++   * that is not from the conflux measured-throughput mechanism. Only change the
++   * global log state when we are really applying the options, not while
++   * validating. */
+   if (!validate_only)
+-    log_set_conflux_mthr_only(options->ConfluxProbeLog >= 2);
++    log_set_conflux_mthr_level(options->ConfluxProbeLog);
+ 
+   ok = 1;
+   elts = smartlist_new();
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index bda608d..e6c4e92 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -828,9 +828,11 @@ struct or_options_t {
+   /** DeltaTor extension: verbosity of the measured-throughput set-selection
+    * diagnostics (ConfluxSetSelection 4). 0 = off, 1 = log the mechanism
+    * alongside tor's own logs, 2 = log only the mechanism and suppress tor's
+-   * other log lines (errors are still shown) so it can be verified in
+-   * isolation. The mechanism lines use the "confluxmthr" log domain, so they
+-   * can also be selected per-target with "Log [CONFLUXMTHR]notice ...". */
++   * other log lines (errors are still shown), 3 = quiet: only the window
++   * openings and one summary line per minute, with tor's other lines
++   * suppressed as in level 2. The mechanism lines use the "confluxmthr" log
++   * domain, so they can also be selected per-target with
++   * "Log [CONFLUXMTHR]notice ...". */
+   int ConfluxProbeLog;
+ 
+   /** DeltaTor extension: override the consensus cfx_drain_pct used by the
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index bc88211..1a603d1 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -290,7 +290,8 @@ conflux_params_get_probe_min_bytes(void)
+ 
+ /** DeltaTor extension: verbosity of the measured-throughput set-selection
+  * diagnostics (ConfluxProbeLog). 0 = off, 1 = mechanism logs only, 2 =
+- * mechanism logs with tor's own log lines suppressed. */
++ * mechanism logs with tor's own log lines suppressed, 3 = quiet: only a
++ * periodic summary (tor's own log lines suppressed as in level 2). */
+ int
+ conflux_params_get_probe_log(void)
+ {
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index 3845686..a0ec7f3 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1523,6 +1523,30 @@ conflux_conn_is_keepalive(const entry_connection_t *conn)
+  * exploration; there is no separate explore option). */
+ #define CONFLUX_MTHR_FLOOR_PCT 10
+ 
++/** DeltaTor extension: with ConfluxProbeLog 3, emit at most one summary line
++ * per this many seconds. Like the rest of the probe this is produced lazily,
++ * when a stream is placed, so a completely idle client emits nothing. */
++#define CONFLUX_MTHR_SUMMARY_SECS 60
++
++/** DeltaTor extension: counters behind the ConfluxProbeLog 3 summary line.
++ * Reset every time a summary is emitted. */
++static struct {
++  uint64_t windows;
++  uint64_t rolls;
++  uint64_t trusted;
++  uint64_t decayed;
++  uint64_t picks;
++  time_t since;
++} conflux_mthr_stats;
++
++/** DeltaTor extension: true when ConfluxProbeLog asks for the detailed
++ * per-event lines (levels 1 and 2). Level 3 keeps only the summary. */
++static bool
++conflux_mthr_detailed_logs(int probe_log)
++{
++  return probe_log == 1 || probe_log == 2;
++}
++
+ /** DeltaTor extension: source of the "set#N" labels used by the ConfluxProbeLog
+  * lines. Process-local and diagnostics-only; assigned lazily when a set's
+  * measurement window is first opened. */
+@@ -1545,6 +1569,7 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+     cfx->mthr_id = conflux_mthr_next_id++;
+     cfx->mthr_win_start = (uint64_t) now;
+     cfx->mthr_prev_recv = cfx->bytes_recv;
++    conflux_mthr_stats.windows++;
+     if (probe_log) {
+       log_notice(LD_CONFLUXMTHR,
+                  "ConfluxProbe set#%"PRIu64" window opened: recv=%"PRIu64"B "
+@@ -1572,7 +1597,9 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+     const uint64_t bps = delta / elapsed;
+     /* Smooth across windows so a single bursty window does not dominate. */
+     cfx->mthr_bps = (cfx->mthr_bps == 0) ? bps : (cfx->mthr_bps + bps) / 2;
+-    if (probe_log) {
++    conflux_mthr_stats.rolls++;
++    conflux_mthr_stats.trusted++;
++    if (conflux_mthr_detailed_logs(probe_log)) {
+       log_notice(LD_CONFLUXMTHR,
+                  "ConfluxProbe set#%"PRIu64" roll: elapsed=%"PRIu64"s "
+                  "delta=%"PRIu64"B bps=%"PRIu64"B/s smoothed=%"PRIu64"B/s "
+@@ -1583,7 +1610,9 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+     /* Too little real traffic this window to trust: decay the estimate so the
+      * set's floor share grows and it is probed again. */
+     cfx->mthr_bps /= 2;
+-    if (probe_log) {
++    conflux_mthr_stats.rolls++;
++    conflux_mthr_stats.decayed++;
++    if (conflux_mthr_detailed_logs(probe_log)) {
+       log_notice(LD_CONFLUXMTHR,
+                  "ConfluxProbe set#%"PRIu64" roll: elapsed=%"PRIu64"s "
+                  "delta=%"PRIu64"B smoothed=%"PRIu64"B/s "
+@@ -1593,6 +1622,53 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+   }
+ }
+ 
++/** DeltaTor extension: emit the periodic ConfluxProbeLog 3 summary line, which
++ * replaces the per-event lines of levels 1 and 2. Like the rest of the probe it
++ * is produced lazily, when a stream is placed, so the line appears at most once
++ * per CONFLUX_MTHR_SUMMARY_SECS and only while the client is active. */
++static void
++conflux_mthr_maybe_log_summary(const smartlist_t *cands, int n, uint64_t floor,
++                               uint64_t total, uint64_t chosen_id, time_t now)
++{
++  if (conflux_mthr_stats.since == 0) {
++    conflux_mthr_stats.since = now;
++    return;
++  }
++  if (now < conflux_mthr_stats.since ||
++      (uint64_t)(now - conflux_mthr_stats.since) <
++      CONFLUX_MTHR_SUMMARY_SECS) {
++    return;
++  }
++
++  uint64_t top_id = 0;
++  uint64_t top_bps = 0;
++  int zero = 0;
++  SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++    if (c->cfx->mthr_bps == 0) {
++      zero++;
++    }
++    if (c->cfx->mthr_bps > top_bps) {
++      top_bps = c->cfx->mthr_bps;
++      top_id = c->cfx->mthr_id;
++    }
++  } SMARTLIST_FOREACH_END(c);
++
++  log_notice(LD_CONFLUXMTHR,
++             "ConfluxProbe summary: t=%"PRIu64"s windows=%"PRIu64" "
++             "rolls=%"PRIu64" (trusted=%"PRIu64" decayed=%"PRIu64") "
++             "picks=%"PRIu64" candidates=%d top=set#%"PRIu64" "
++             "top_bps=%"PRIu64"B/s floor=%"PRIu64" total_weight=%"PRIu64" "
++             "zero_sets=%d last=set#%"PRIu64,
++             (uint64_t)(now - conflux_mthr_stats.since),
++             conflux_mthr_stats.windows, conflux_mthr_stats.rolls,
++             conflux_mthr_stats.trusted, conflux_mthr_stats.decayed,
++             conflux_mthr_stats.picks, n, top_id, top_bps, floor, total, zero,
++             chosen_id);
++
++  memset(&conflux_mthr_stats, 0, sizeof(conflux_mthr_stats));
++  conflux_mthr_stats.since = now;
++}
++
+ /** DeltaTor extension: pick the set to attach a new stream to, honoring the
+  * configured selection policy. If keepalive_balance is true (DeltaTor keep-alive
+  * streams), pick the set with the fewest cumulative streams: a stable,
+@@ -1698,7 +1774,7 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance,
+ 
+       const uint64_t r = crypto_rand_uint64(total);
+ 
+-      if (probe_log) {
++      if (conflux_mthr_detailed_logs(probe_log)) {
+         SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+           log_notice(LD_CONFLUXMTHR,
+                      "ConfluxProbe candidate set#%"PRIu64" bps=%"PRIu64"B/s "
+@@ -1724,9 +1800,15 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance,
+ 
+       if (probe_log) {
+         const conflux_set_candidate_t *chosen = smartlist_get(cands, picked);
+-        log_notice(LD_CONFLUXMTHR,
+-                   "ConfluxProbe chose set#%"PRIu64" bps=%"PRIu64"B/s",
+-                   chosen->cfx->mthr_id, chosen->cfx->mthr_bps);
++        conflux_mthr_stats.picks++;
++        if (conflux_mthr_detailed_logs(probe_log)) {
++          log_notice(LD_CONFLUXMTHR,
++                     "ConfluxProbe chose set#%"PRIu64" bps=%"PRIu64"B/s",
++                     chosen->cfx->mthr_id, chosen->cfx->mthr_bps);
++        } else {
++          conflux_mthr_maybe_log_summary(cands, n, floor, total,
++                                         chosen->cfx->mthr_id, now);
++        }
+       }
+     } else {
+       /* CONFLUX_SET_SELECT_FIRST and anything unknown: first candidate. */
+diff --git a/src/lib/log/log.c b/src/lib/log/log.c
+index 341049f..4181184 100644
+--- a/src/lib/log/log.c
++++ b/src/lib/log/log.c
+@@ -131,10 +131,23 @@ static logfile_t *logfiles = NULL;
+ /** Boolean: do we report logging domains? */
+ static int log_domains_are_logged = 0;
+ 
+-/** DeltaTor extension: when true, logv() drops every line that is not from the
+- * conflux measured-throughput mechanism (LD_CONFLUXMTHR); LOG_ERR is always
+- * kept. Set by ConfluxProbeLog 2 via log_set_conflux_mthr_only(). */
+-static int conflux_mthr_only_logs = 0;
++/** DeltaTor extension: verbosity of the conflux measured-throughput mechanism
++ * diagnostics (ConfluxProbeLog): 0 = off, 1 = mechanism lines alongside tor's
++ * own logs, 2 = mechanism lines only, 3 = quiet (levels 2 plus the per-event
++ * lines suppressed, so only a periodic summary remains). At levels 2 and 3,
++ * logv() drops every line that is not from LD_CONFLUXMTHR; LOG_ERR is always
++ * kept. Set by log_set_conflux_mthr_level(). */
++static int conflux_mthr_log_level = 0;
++
++/** DeltaTor extension: return true iff the ConfluxProbeLog level suppresses
++ * every log line that is not part of the conflux measured-throughput mechanism.
++ * Errors are never suppressed. */
++static int
++conflux_mthr_drops(int severity, log_domain_mask_t domain)
++{
++  return conflux_mthr_log_level >= 2 && severity != LOG_ERR &&
++         !(domain & LD_CONFLUXMTHR);
++}
+ 
+ #ifdef HAVE_SYSLOG_H
+ /** The number of open syslog log handlers that we have.  When this reaches 0,
+@@ -553,11 +566,10 @@ logv,(int severity, log_domain_mask_t domain, const char *funcname,
+    * interesting and hard to diagnose effects */
+   raw_assert(severity >= LOG_ERR && severity <= LOG_DEBUG);
+ 
+-  /* DeltaTor extension: with ConfluxProbeLog 2, discard every line that is
+-   * not from the conflux measured-throughput mechanism so its output can be
+-   * read in isolation. Errors are always kept. */
+-  if (conflux_mthr_only_logs && severity != LOG_ERR &&
+-      !(domain & LD_CONFLUXMTHR)) {
++  /* DeltaTor extension: at ConfluxProbeLog level 2 or higher, discard every
++   * line that is not from the conflux measured-throughput mechanism so its
++   * output can be read in isolation. Errors are always kept. */
++  if (conflux_mthr_drops(severity, domain)) {
+     return;
+   }
+ 
+@@ -957,13 +969,15 @@ logs_set_domain_logging(int enabled)
+   UNLOCK_LOGS();
+ }
+ 
+-/** DeltaTor extension: turn the "only the conflux measured-throughput
+- * mechanism" log filter on or off. See log_set_conflux_mthr_only() in log.h. */
++/** DeltaTor extension: set the "only the conflux measured-throughput
++ * mechanism" log filter level (ConfluxProbeLog). Levels 2 and 3 also make the
++ * startup messages that were queued before the log file existed get filtered
++ * out when they are replayed. See log_set_conflux_mthr_level() in log.h. */
+ void
+-log_set_conflux_mthr_only(int enabled)
++log_set_conflux_mthr_level(int level)
+ {
+   LOCK_LOGS();
+-  conflux_mthr_only_logs = enabled;
++  conflux_mthr_log_level = level;
+   UNLOCK_LOGS();
+ }
+ 
+@@ -1097,6 +1111,16 @@ flush_log_messages_from_startup(void)
+   SMARTLIST_FOREACH_BEGIN(pending_startup_messages, pending_log_message_t *,
+                           msg) {
+     int callbacks_deferred = 0;
++
++    /* DeltaTor extension: these messages were queued before the Log targets
++     * were configured, so logv() could not filter them yet. Apply the
++     * ConfluxProbeLog level here too, otherwise a level-2 or level-3 log file
++     * would still start with the whole tor startup banner. */
++    if (conflux_mthr_drops(msg->severity, msg->domain)) {
++      pending_log_message_free(msg);
++      continue;
++    }
++
+     for (lf = logfiles; lf; lf = lf->next) {
+       if (! logfile_wants_message(lf, msg->severity, msg->domain))
+         continue;
+diff --git a/src/lib/log/log.h b/src/lib/log/log.h
+index d8a72f3..7e21cc7 100644
+--- a/src/lib/log/log.h
++++ b/src/lib/log/log.h
+@@ -120,8 +120,8 @@
+ /** Message-passing backend. */
+ #define LD_MESG      (UINT64_C(1)<<29)
+ /** DeltaTor extension: conflux measured-throughput set selection
+- * (ConfluxSetSelection 4). Enable with ConfluxProbeLog (1 or 2), or select it
+- * in a Log target with the domain name "confluxmthr". */
++ * (ConfluxSetSelection 4). Enable with ConfluxProbeLog (1, 2 or 3), or select
++ * it in a Log target with the domain name "confluxmthr". */
+ #define LD_CONFLUXMTHR (UINT64_C(1)<<30)
+ 
+ /** The number of log domains. */
+@@ -183,11 +183,12 @@ int add_callback_log(const log_severity_list_t *severity, log_callback cb);
+ typedef void (*pending_callback_callback)(void);
+ void logs_set_pending_callback_callback(pending_callback_callback cb);
+ void logs_set_domain_logging(int enabled);
+-/** DeltaTor extension: when <b>enabled</b>, drop every log line whose domain
+- * does not include LD_CONFLUXMTHR (errors are always kept), so the
+- * measured-throughput selection logs can be read in isolation. Driven by the
+- * ConfluxProbeLog torrc option. */
+-void log_set_conflux_mthr_only(int enabled);
++/** DeltaTor extension: set the verbosity of the conflux measured-throughput
++ * mechanism diagnostics (ConfluxProbeLog): 0 = off, 1 = mechanism lines
++ * alongside tor's own logs, 2 = mechanism lines only, 3 = summary only. At
++ * levels 2 and 3 every log line whose domain does not include LD_CONFLUXMTHR
++ * is dropped (errors are always kept). */
++void log_set_conflux_mthr_level(int level);
+ int get_min_log_level(void);
+ void switch_logs_debug(void);
+ void logs_free_all(void);
+-- 
+2.56.0.windows.2
+

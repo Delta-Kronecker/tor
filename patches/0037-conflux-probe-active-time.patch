@@ -1,0 +1,238 @@
+From a26b01afa3041b831cd49a8d52e5d50b215618c7 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Wed, 18 Nov 2026 18:25:59 +0330
+Subject: [PATCH 37/38] conflux: measure probe throughput over active time, not
+ idle time
+
+The measured-throughput estimate divided a window's delivered bytes by the
+whole wall-clock window. But a window is only rolled when a new stream is
+placed, so `elapsed` includes every second in which nobody used the set. A set
+that moved its bytes in a two-second burst and was then idle for a minute was
+therefore reported as roughly 1/30th of its real speed, and a set that merely
+had no traffic looked slow enough to decay.
+
+Record the monotonic timestamps of the first and last payload byte counted in
+the current window (one cheap call from circuit_read_valid_data(), which
+already updates the set's byte counter) and divide by that active span
+instead. A single delivered cell counts as a 1 ms span, and the wall-clock
+window remains the upper bound because the two clocks are independent.
+
+The roll lines now print both numbers (`elapsed` and `active`) so the
+correction is visible, and the estimate itself only uses `active`.
+---
+ doc/DELTATOR-CHANGES.md    |  2 +-
+ doc/man/tor.1.txt          | 11 +++++--
+ src/core/or/circuituse.c   |  6 ++++
+ src/core/or/conflux_pool.c | 67 +++++++++++++++++++++++++++++++++-----
+ src/core/or/conflux_pool.h |  6 ++++
+ src/core/or/conflux_st.h   |  8 +++++
+ 6 files changed, 87 insertions(+), 13 deletions(-)
+
+diff --git a/doc/DELTATOR-CHANGES.md b/doc/DELTATOR-CHANGES.md
+index d9eaafa..2e6effb 100644
+--- a/doc/DELTATOR-CHANGES.md
++++ b/doc/DELTATOR-CHANGES.md
+@@ -17,7 +17,7 @@ All options are validated in `src/app/config/config.c` and documented in
+ | `ConfluxSetSelection` | 0-4 | Set pick policy for new streams: first / round-robin / least-streams / fastest / measured-throughput |
+ | `ConfluxSetRttMax` | >= 0 ms | Skip sets whose best-leg RTT is at/above this (never empties the candidate list) |
+ | `ConfluxSetRttPct` | 0-100 % | Restrict new streams to the best N% of sets by RTT (keeps at least one set) |
+-| `ConfluxProbeInterval` | 0-3600 s | Measurement window for `ConfluxSetSelection 4`; every window all sets' real download throughput is re-estimated (0 = 30 s) |
++| `ConfluxProbeInterval` | 0-3600 s | Measurement window for `ConfluxSetSelection 4`; every window all sets' real download throughput is re-estimated over the time each set actually moved bytes (0 = 30 s) |
+ | `ConfluxProbeMinBytes` | >= 0 bytes | Minimum delivered bytes per window before a set's throughput estimate is trusted (0 = 32768) |
+ | `ConfluxProbeLog` | 0-3 | Diagnostics for the measured-throughput selection: 0 = off, 1 = log the mechanism, 2 = log only the mechanism (suppress tor's other log lines; errors kept), 3 = quiet: only a summary line per minute |
+ | `ConfluxDrainPct` | 0-255 | Leg drain percent before a leg switch is allowed; 100 lets a leg be swapped as soon as its in-flight data drains |
+diff --git a/doc/man/tor.1.txt b/doc/man/tor.1.txt
+index d3114c2..2af9817 100644
+--- a/doc/man/tor.1.txt
++++ b/doc/man/tor.1.txt
+@@ -419,8 +419,11 @@ forward slash (/) in the configuration file and on the command line.
+     DeltaTor extension: measurement window, in seconds, used by
+     ConfluxSetSelection 4. Every window each set's real delivered download
+     throughput is re-estimated, so the fastest set is re-discovered and slow
+-    sets are given another chance. 0 uses the internal default of 30. Valid
+-    range: 0-3600. (Default: 0)
++    sets are given another chance. Because a window is only rolled when a new
++    stream is placed, the throughput is measured over the part of the window in
++    which the set actually delivered bytes, so idle time does not make an
++    unused set look slow. 0 uses the internal default of 30. Valid range:
++    0-3600. (Default: 0)
+ 
+ [[ConfluxProbeMinBytes]] **ConfluxProbeMinBytes** __NUM__::
+     DeltaTor extension: minimum delivered bytes a conflux set must move inside
+@@ -439,7 +442,9 @@ forward slash (/) in the configuration file and on the command line.
+     single summary line per minute (window and roll counters, the fastest
+     candidate, the floor, the total weight and the last set chosen).
+     In levels 2 and 3 the lines that tor buffers during startup are filtered
+-    too, so the log file starts directly with the mechanism output. The
++    too, so the log file starts directly with the mechanism output. Roll lines
++    report both the full window (|elapsed|) and the part of it during which the
++    set delivered bytes (|active|); only |active| is used for the estimate. The
+     mechanism lines use the "confluxmthr" logging domain, so they can also be
+     selected per target, for example with
+     "Log [confluxmthr]notice file conflux-probe.log". Valid range: 0-3.
+diff --git a/src/core/or/circuituse.c b/src/core/or/circuituse.c
+index a00bcf1..5d70e5c 100644
+--- a/src/core/or/circuituse.c
++++ b/src/core/or/circuituse.c
+@@ -3475,5 +3475,11 @@ circuit_read_valid_data(origin_circuit_t *circ, uint16_t relay_body_len)
+   conflux_t *cfx = TO_CIRCUIT(circ)->conflux;
+   if (cfx) {
+     cfx->bytes_recv += relay_body_len;
++    /* DeltaTor: tell the measured-throughput probe that this set is moving
++     * bytes right now, so its estimate uses the time the set was really busy
++     * rather than the whole lazily rolled wall-clock window. */
++    if (relay_body_len > 0) {
++      conflux_note_recv_activity(cfx);
++    }
+   }
+ }
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index a0ec7f3..5577ecf 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1547,6 +1547,25 @@ conflux_mthr_detailed_logs(int probe_log)
+   return probe_log == 1 || probe_log == 2;
+ }
+ 
++/** DeltaTor extension: record that the given set delivered payload bytes right
++ * now. Called from the data path (once per delivered relay cell) so the
++ * measured-throughput probe can tell how long a set was really busy instead of
++ * assuming it was busy for the whole lazily rolled wall-clock window. */
++void
++conflux_note_recv_activity(conflux_t *cfx)
++{
++  uint64_t now_ms;
++
++  if (!cfx) {
++    return;
++  }
++  now_ms = monotime_coarse_absolute_msec();
++  if (cfx->mthr_first_active_ms == 0) {
++    cfx->mthr_first_active_ms = now_ms;
++  }
++  cfx->mthr_last_active_ms = now_ms;
++}
++
+ /** DeltaTor extension: source of the "set#N" labels used by the ConfluxProbeLog
+  * lines. Process-local and diagnostics-only; assigned lazily when a set's
+  * measurement window is first opened. */
+@@ -1569,6 +1588,8 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+     cfx->mthr_id = conflux_mthr_next_id++;
+     cfx->mthr_win_start = (uint64_t) now;
+     cfx->mthr_prev_recv = cfx->bytes_recv;
++    cfx->mthr_first_active_ms = 0;
++    cfx->mthr_last_active_ms = 0;
+     conflux_mthr_stats.windows++;
+     if (probe_log) {
+       log_notice(LD_CONFLUXMTHR,
+@@ -1590,11 +1611,35 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+   const uint64_t delta = (cfx->bytes_recv >= cfx->mthr_prev_recv) ?
+     cfx->bytes_recv - cfx->mthr_prev_recv : 0;
+ 
++  /* DeltaTor: the window is only rolled when a new stream is placed, so
++   * `elapsed` can include long stretches in which the set moved no bytes. Use
++   * the monotonic time during which bytes actually arrived instead, so a set
++   * that did all its work in a short burst is not reported as slow (and its
++   * estimate is not decayed just because the client went quiet). The elapsed
++   * wall clock stays the upper bound: the two clocks are independent. */
++  const bool had_activity = cfx->mthr_first_active_ms != 0 &&
++    cfx->mthr_last_active_ms >= cfx->mthr_first_active_ms;
++  uint64_t active_ms = had_activity ?
++    cfx->mthr_last_active_ms - cfx->mthr_first_active_ms : 0;
++  if (had_activity && active_ms == 0) {
++    /* A single delivered cell: keep it as a real (tiny) measurement. */
++    active_ms = 1;
++  }
++  if (active_ms > elapsed * 1000) {
++    active_ms = elapsed * 1000;
++  }
++  const uint64_t span_ms = active_ms ? active_ms : elapsed * 1000;
++
+   cfx->mthr_prev_recv = cfx->bytes_recv;
+   cfx->mthr_win_start = (uint64_t) now;
+-
+-  if (delta >= min_bytes && elapsed > 0) {
+-    const uint64_t bps = delta / elapsed;
++  cfx->mthr_first_active_ms = 0;
++  cfx->mthr_last_active_ms = 0;
++
++  if (delta >= min_bytes && elapsed > 0 && span_ms > 0) {
++    /* Bytes per second over the time the set was actually moving bytes. */
++    const uint64_t bps = (delta * 1000) / span_ms;
++    const uint64_t span_s = span_ms / 1000;
++    const uint64_t span_frac = span_ms % 1000;
+     /* Smooth across windows so a single bursty window does not dominate. */
+     cfx->mthr_bps = (cfx->mthr_bps == 0) ? bps : (cfx->mthr_bps + bps) / 2;
+     conflux_mthr_stats.rolls++;
+@@ -1602,22 +1647,26 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+     if (conflux_mthr_detailed_logs(probe_log)) {
+       log_notice(LD_CONFLUXMTHR,
+                  "ConfluxProbe set#%"PRIu64" roll: elapsed=%"PRIu64"s "
+-                 "delta=%"PRIu64"B bps=%"PRIu64"B/s smoothed=%"PRIu64"B/s "
+-                 "(trusted)",
+-                 cfx->mthr_id, elapsed, delta, bps, cfx->mthr_bps);
++                 "active=%"PRIu64".%03"PRIu64"s delta=%"PRIu64"B "
++                 "bps=%"PRIu64"B/s smoothed=%"PRIu64"B/s (trusted)",
++                 cfx->mthr_id, elapsed, span_s, span_frac, delta, bps,
++                 cfx->mthr_bps);
+     }
+   } else {
+     /* Too little real traffic this window to trust: decay the estimate so the
+      * set's floor share grows and it is probed again. */
++    const uint64_t span_s = span_ms / 1000;
++    const uint64_t span_frac = span_ms % 1000;
+     cfx->mthr_bps /= 2;
+     conflux_mthr_stats.rolls++;
+     conflux_mthr_stats.decayed++;
+     if (conflux_mthr_detailed_logs(probe_log)) {
+       log_notice(LD_CONFLUXMTHR,
+                  "ConfluxProbe set#%"PRIu64" roll: elapsed=%"PRIu64"s "
+-                 "delta=%"PRIu64"B smoothed=%"PRIu64"B/s "
+-                 "(low-traffic, decayed)",
+-                 cfx->mthr_id, elapsed, delta, cfx->mthr_bps);
++                 "active=%"PRIu64".%03"PRIu64"s delta=%"PRIu64"B "
++                 "smoothed=%"PRIu64"B/s (low-traffic, decayed)",
++                 cfx->mthr_id, elapsed, span_s, span_frac, delta,
++                 cfx->mthr_bps);
+     }
+   }
+ }
+diff --git a/src/core/or/conflux_pool.h b/src/core/or/conflux_pool.h
+index 7ce32ac..74a375b 100644
+--- a/src/core/or/conflux_pool.h
++++ b/src/core/or/conflux_pool.h
+@@ -43,6 +43,12 @@ void conflux_process_linked_ack(circuit_t *circ);
+ typedef struct conflux_t conflux_t;
+ void conflux_log_set(int loglevel, const conflux_t *cfx, bool is_client);
+ 
++/** DeltaTor extension: note that a conflux set just delivered payload bytes, so
++ * the measured-throughput probe can measure the time the set was actually busy
++ * instead of the whole lazily rolled wall-clock window. Called from the data
++ * path, once per delivered relay cell. */
++void conflux_note_recv_activity(conflux_t *cfx);
++
+ #ifdef TOR_UNIT_TESTS
+ bool launch_new_set(int num_legs);
+ void conflux_clear_shutdown(void);
+diff --git a/src/core/or/conflux_st.h b/src/core/or/conflux_st.h
+index 7eb476f..6905ad0 100644
+--- a/src/core/or/conflux_st.h
++++ b/src/core/or/conflux_st.h
+@@ -155,6 +155,14 @@ struct conflux_t {
+   uint64_t mthr_prev_recv;
+   uint64_t mthr_bps;
+ 
++  /** DeltaTor: monotonic-millisecond timestamps of the first and last payload
++   * byte counted in the current measurement window (0 = no byte seen yet).
++   * A window is only rolled when a new stream is placed, so the wall-clock
++   * window length includes idle time; these two let the estimate use the time
++   * during which the set was actually moving bytes. */
++  uint64_t mthr_first_active_ms;
++  uint64_t mthr_last_active_ms;
++
+   /** DeltaTor: process-local, monotonically increasing id used only to label
+    * the ConfluxProbeLog diagnostic lines ("set#N"). Assigned lazily the first
+    * time the set's measurement window is opened. */
+-- 
+2.56.0.windows.2
+
