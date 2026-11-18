@@ -1,0 +1,28 @@
+From 547267f5e1dbb490d079e75ba1cbdb5e8d0fc2e1 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Wed, 18 Nov 2026 05:01:52 +0330
+Subject: [PATCH] conflux: fix the -Wshadow warning in conflux_set_best_rtt
+
+CONFLUX_FOR_EACH_LEG_BEGIN (via SMARTLIST_FOREACH_BEGIN) already declares
+its own conflux_leg_t *leg inside the macro's block, so the extra local
+declaration in conflux_set_best_rtt was shadowed and unused. Remove it; the
+loop is unchanged.
+---
+ src/core/or/conflux_pool.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index aa96acb..88b41b4 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1449,7 +1449,6 @@ static uint64_t
+ conflux_set_best_rtt(const conflux_t *cfx)
+ {
+   uint64_t best = UINT64_MAX;
+-  conflux_leg_t *leg;
+   CONFLUX_FOR_EACH_LEG_BEGIN(cfx, leg) {
+     if (leg->circ_rtts_usec > 0 && leg->circ_rtts_usec < best) {
+       best = leg->circ_rtts_usec;
+-- 
+2.56.0.windows.2
+
