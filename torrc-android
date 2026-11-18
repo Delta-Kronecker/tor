@@ -57,6 +57,13 @@ ConfluxNumLegs 4
 ConfluxSetSelection 4
 ConfluxProbeInterval 30
 ConfluxProbeMinBytes 32768
+# Diagnostics for the measured-throughput mechanism: 0 = off (normal use),
+# 1 = log every measurement window, per-set throughput, candidate weight and the
+# chosen set alongside tor's own logs, 2 = log only those lines and suppress all
+# other tor log lines (errors are still shown). The lines use the "confluxmthr"
+# domain; to write them to their own file, use a target such as:
+#   Log [confluxmthr]notice file conflux-probe.log
+ConfluxProbeLog 0
 ConfluxSetRttPct 33
 # With more than two legs per set (ConfluxNumLegs above), upstream's conflux
 # scheduler wants cfx_drain_pct 100 so a leg can be switched away from as soon
