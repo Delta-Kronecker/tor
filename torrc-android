@@ -70,7 +70,7 @@ ConfluxLowExitThreshold 1
 # DeltaTor speed tuning: buffers. Keep more cells queued per circuit and per OR
 # connection so high-latency links stay busy instead of going idle between
 # scheduler runs (costs memory).
-CircuitCellQueueHigh 1024
+CircuitCellQueueHigh 1000
 CircuitCellQueueLow 64
 OrConnHighWater 262144
 OrConnLowWater 32768
