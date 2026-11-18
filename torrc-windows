@@ -58,13 +58,19 @@ MaxClientCircuitsPending 256
 CircuitPriorityHalflife 5
 SocksTimeout 120
 
-# Keep a pool of ready conflux sets. Restrict new streams to the fastest
-# ConfluxSetRttPct% of candidate sets (33% keeps about 3 sets with the 12-set
-# pool), then use the fewest-streams policy across those to balance load.
+# Keep a pool of ready conflux sets. ConfluxSetSelection 4 measures each set's
+# real delivered download speed and spreads new streams in proportion to it,
+# with a built-in 10% floor so no set is starved and every set keeps getting
+# enough traffic to stay measurable. The measurement window is re-taken every
+# ConfluxProbeInterval seconds; a set must move at least ConfluxProbeMinBytes
+# in a window for its estimate to be trusted. Mode 4 ignores the RTT filters
+# below (they still apply if you switch back to modes 2/3).
 ConfluxNumSets 12
 ConfluxNumLinkedSets 12
 ConfluxNumLegs 4
-ConfluxSetSelection 2
+ConfluxSetSelection 4
+ConfluxProbeInterval 30
+ConfluxProbeMinBytes 32768
 ConfluxSetRttPct 33
 # With more than two legs per set (ConfluxNumLegs above), upstream's conflux
 # scheduler wants cfx_drain_pct 100 so a leg can be switched away from as soon

@@ -1,0 +1,429 @@
+From 2ea860845d53107baed7d45f875470b64a676cd1 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Wed, 18 Nov 2026 04:40:24 +0330
+Subject: [PATCH] conflux: add measured-throughput set selection
+ (ConfluxSetSelection 4)
+
+Mode 4 measures each set's real delivered download throughput from the
+existing per-set bytes_recv counter and spreads new streams in proportion
+to it, with a built-in floor of 10% of the fastest set so no set is starved
+and every set keeps receiving enough real traffic to stay measurable. The
+window is folded lazily when a stream is placed: no timer, no per-cell
+accounting, and no extra traffic.
+
+Two new options tune it (0 = internal default):
+  - ConfluxProbeInterval: measurement window/re-test period (default 30s)
+  - ConfluxProbeMinBytes: minimum delivered bytes per window to trust the
+    estimate (default 32768)
+
+Mode 4 bypasses ConfluxSetRttMax/ConfluxSetRttPct so every set is sampled.
+---
+ doc/DELTATOR-CHANGES.md        |   4 +-
+ doc/man/tor.1.txt              |  21 ++++++-
+ src/app/config/config.c        |  21 ++++++-
+ src/app/config/or_options_st.h |  16 ++++-
+ src/core/or/conflux_params.c   |  29 ++++++++-
+ src/core/or/conflux_params.h   |   4 ++
+ src/core/or/conflux_pool.c     | 111 +++++++++++++++++++++++++++++++--
+ src/core/or/conflux_st.h       |   8 +++
+ 8 files changed, 202 insertions(+), 12 deletions(-)
+
+diff --git a/doc/DELTATOR-CHANGES.md b/doc/DELTATOR-CHANGES.md
+index 50fe21a..4fd3225 100644
+--- a/doc/DELTATOR-CHANGES.md
++++ b/doc/DELTATOR-CHANGES.md
+@@ -14,9 +14,11 @@ All options are validated in `src/app/config/config.c` and documented in
+ | `ConfluxNumSets` | 0-32 | Sets kept alive; overrides consensus `cfx_max_prebuilt_set`/`cfx_max_linked_set` |
+ | `ConfluxNumLegs` | 0-16 | Legs built per set; overrides consensus `cfx_num_legs_set` |
+ | `ConfluxNumLinkedSets` | 0-32 | Ceiling on *linked* sets; binds only when below `ConfluxNumSets` |
+-| `ConfluxSetSelection` | 0-3 | Set pick policy for new streams: first / round-robin / least-streams / fastest |
++| `ConfluxSetSelection` | 0-4 | Set pick policy for new streams: first / round-robin / least-streams / fastest / measured-throughput |
+ | `ConfluxSetRttMax` | >= 0 ms | Skip sets whose best-leg RTT is at/above this (never empties the candidate list) |
+ | `ConfluxSetRttPct` | 0-100 % | Restrict new streams to the best N% of sets by RTT (keeps at least one set) |
++| `ConfluxProbeInterval` | 0-3600 s | Measurement window for `ConfluxSetSelection 4`; every window all sets' real download throughput is re-estimated (0 = 30 s) |
++| `ConfluxProbeMinBytes` | >= 0 bytes | Minimum delivered bytes per window before a set's throughput estimate is trusted (0 = 32768) |
+ | `ConfluxDrainPct` | 0-255 | Leg drain percent before a leg switch is allowed; 100 lets a leg be swapped as soon as its in-flight data drains |
+ | `ConfluxLowExitThreshold` | 0-100 % | Exit-support ratio below which only one prebuilt set is built; 1 keeps the full ConfluxNumSets pool |
+ | `ConfluxMaxOooqBytes` | >= 0 bytes | Max bytes buffered per conflux out-of-order queue before the set is closed (0 = consensus default) |
+diff --git a/doc/man/tor.1.txt b/doc/man/tor.1.txt
+index 673ca4b..d8c39a9 100644
+--- a/doc/man/tor.1.txt
++++ b/doc/man/tor.1.txt
+@@ -394,7 +394,13 @@ forward slash (/) in the configuration file and on the command line.
+ [[ConfluxSetSelection]] **ConfluxSetSelection** __NUM__::
+     DeltaTor extension: policy used when attaching a new stream to a conflux
+     set. 0 = first acceptable set, 1 = round-robin across sets,
+-    2 = set with fewest streams, 3 = set with lowest best-leg RTT.
++    2 = set with fewest streams, 3 = set with lowest best-leg RTT,
++    4 = weighted by each set's measured real download throughput. Mode 4
++    spreads new streams in proportion to the delivered bytes/sec recently
++    observed on each set, with a built-in 10% floor so no set is starved and
++    every set keeps getting the real traffic needed to stay measurable; the
++    measurement is re-taken every ConfluxProbeInterval seconds and ignores the
++    ConfluxSetRttMax/ConfluxSetRttPct filters so all sets get sampled.
+     (Default: 1)
+ 
+ [[ConfluxSetRttMax]] **ConfluxSetRttMax** __NUM__::
+@@ -409,6 +415,19 @@ forward slash (/) in the configuration file and on the command line.
+     least one set. Applied after ConfluxSetRttMax. 0 disables the filter.
+     Valid range: 0-100. (Default: 0)
+ 
++[[ConfluxProbeInterval]] **ConfluxProbeInterval** __NUM__::
++    DeltaTor extension: measurement window, in seconds, used by
++    ConfluxSetSelection 4. Every window each set's real delivered download
++    throughput is re-estimated, so the fastest set is re-discovered and slow
++    sets are given another chance. 0 uses the internal default of 30. Valid
++    range: 0-3600. (Default: 0)
++
++[[ConfluxProbeMinBytes]] **ConfluxProbeMinBytes** __NUM__::
++    DeltaTor extension: minimum delivered bytes a conflux set must move inside
++    one ConfluxProbeInterval window before its throughput estimate is trusted.
++    Sets below it are sampled again and their estimate decays. 0 uses the
++    internal default of 32768. Must be >= 0. (Default: 0)
++
+ [[ConfluxDrainPct]] **ConfluxDrainPct** __NUM__::
+     DeltaTor extension: override the consensus cfx_drain_pct, the percent of a
+     leg's in-flight data that must drain before a switch to another leg is
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index 84533d0..311e14e 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -391,6 +391,8 @@ static const config_var_t option_vars_[] = {
+   V(ConfluxSetSelection,         INT,      "1"),
+   V(ConfluxSetRttMax,            INT,      "0"),
+   V(ConfluxSetRttPct,            INT,      "0"),
++  V(ConfluxProbeInterval,        INT,      "0"),
++  V(ConfluxProbeMinBytes,        INT,      "0"),
+   V(ConfluxDrainPct,             INT,      "0"),
+   V(ConfluxLowExitThreshold,     INT,      "0"),
+   V(ConfluxMaxOooqBytes,         INT,      "0"),
+@@ -3685,9 +3687,10 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+     REJECT("ConfluxNumLinkedSets must be between 0 (consensus default) and 32");
+   }
+ 
+-  if (options->ConfluxSetSelection < 0 || options->ConfluxSetSelection > 3) {
+-    REJECT("ConfluxSetSelection must be between 0 and 3 "
+-           "(0=first, 1=round-robin, 2=least-streams, 3=fastest)");
++  if (options->ConfluxSetSelection < 0 || options->ConfluxSetSelection > 4) {
++    REJECT("ConfluxSetSelection must be between 0 and 4 "
++           "(0=first, 1=round-robin, 2=least-streams, 3=fastest, "
++           "4=measured-throughput)");
+   }
+ 
+   if (options->ConfluxSetRttMax < 0) {
+@@ -3699,6 +3702,18 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+            "(percent of lowest-RTT sets to keep; 0 disables the filter)");
+   }
+ 
++  if (options->ConfluxProbeInterval < 0 ||
++      options->ConfluxProbeInterval > 3600) {
++    REJECT("ConfluxProbeInterval must be between 0 (internal default, 30s) "
++           "and 3600 seconds");
++  }
++
++  if (options->ConfluxProbeMinBytes < 0 ||
++      options->ConfluxProbeMinBytes > 100000000) {
++    REJECT("ConfluxProbeMinBytes must be between 0 (internal default, 32768) "
++           "and 100000000 bytes");
++  }
++
+   if (options->ConfluxDrainPct < 0 || options->ConfluxDrainPct > 255) {
+     REJECT("ConfluxDrainPct must be between 0 (consensus default) and 255");
+   }
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index 9762846..4bd40c5 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -796,7 +796,9 @@ struct or_options_t {
+   /** DeltaTor extension: how to pick the conflux set a new stream is attached
+    * to. 0 = first acceptable (stock behavior), 1 = round-robin across the
+    * acceptable sets, 2 = the set with the fewest attached streams,
+-   * 3 = the set with the lowest best-leg RTT. */
++   * 3 = the set with the lowest best-leg RTT, 4 = weighted by each set's
++   * measured real download throughput (no set is starved; see
++   * ConfluxProbeInterval and ConfluxProbeMinBytes). */
+   int ConfluxSetSelection;
+ 
+   /** DeltaTor extension: skip a conflux set when choosing one for a new stream
+@@ -811,6 +813,18 @@ struct or_options_t {
+    * always keeps at least one candidate so streams can still attach. */
+   int ConfluxSetRttPct;
+ 
++  /** DeltaTor extension: measurement window, in seconds, used by
++   * ConfluxSetSelection 4. Each window every set's delivered download
++   * throughput is re-estimated from its real traffic, so the fastest set is
++   * re-discovered periodically. 0 (default) uses the internal default of 30. */
++  int ConfluxProbeInterval;
++
++  /** DeltaTor extension: minimum delivered bytes a set must move inside one
++   * measurement window before its throughput estimate is trusted; below this
++   * the estimate decays so the set is sampled again. 0 (default) uses the
++   * internal default of 32768 bytes. */
++  int ConfluxProbeMinBytes;
++
+   /** DeltaTor extension: override the consensus cfx_drain_pct used by the
+    * conflux leg scheduler. This is the percentage of a leg's congestion window
+    * that may still be in flight before conflux is allowed to switch away from
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index 428494a..1d1c799 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -250,7 +250,8 @@ conflux_params_set_num_legs(uint8_t n)
+ }
+ 
+ /** DeltaTor extension: return the set-selection policy for new streams.
+- * 0 = first acceptable, 1 = round-robin, 2 = least-streams, 3 = fastest. */
++ * 0 = first acceptable, 1 = round-robin, 2 = least-streams, 3 = fastest,
++ * 4 = measured-throughput (weighted by real download speed). */
+ int
+ conflux_params_get_set_selection(void)
+ {
+@@ -261,6 +262,32 @@ conflux_params_get_set_selection(void)
+   return 0;
+ }
+ 
++/** DeltaTor extension: measurement window, in seconds, for the measured-
++ * throughput policy (ConfluxSetSelection 4). Each window the delivered
++ * download throughput of every set is re-estimated. 0 (default) uses 30s. */
++int
++conflux_params_get_probe_interval(void)
++{
++  const or_options_t *opts = get_options();
++  if (opts && opts->ConfluxProbeInterval > 0) {
++    return opts->ConfluxProbeInterval;
++  }
++  return 30;
++}
++
++/** DeltaTor extension: minimum delivered bytes a set must move within one
++ * measurement window before its throughput estimate is trusted. 0 (default)
++ * uses 32768 bytes. */
++int
++conflux_params_get_probe_min_bytes(void)
++{
++  const or_options_t *opts = get_options();
++  if (opts && opts->ConfluxProbeMinBytes > 0) {
++    return opts->ConfluxProbeMinBytes;
++  }
++  return 32768;
++}
++
+ /** DeltaTor extension: return the slow-set RTT filter in milliseconds. 0 means
+  * no filter (every acceptable set is a candidate). */
+ int
+diff --git a/src/core/or/conflux_params.h b/src/core/or/conflux_params.h
+index 7c5cea2..94d7ba5 100644
+--- a/src/core/or/conflux_params.h
++++ b/src/core/or/conflux_params.h
+@@ -17,6 +17,8 @@ typedef enum conflux_set_select_t {
+   CONFLUX_SET_SELECT_ROUND_ROBIN = 1,
+   CONFLUX_SET_SELECT_LEAST_STREAMS = 2,
+   CONFLUX_SET_SELECT_FASTEST = 3,
++  /** DeltaTor: weighted by each set's measured real download throughput. */
++  CONFLUX_SET_SELECT_MEASURED = 4,
+ } conflux_set_select_t;
+ 
+ bool conflux_is_enabled(const struct circuit_t *circ);
+@@ -29,6 +31,8 @@ void conflux_params_set_num_legs(uint8_t n);
+ int conflux_params_get_set_selection(void);
+ int conflux_params_get_set_rtt_max(void);
+ int conflux_params_get_set_rtt_pct(void);
++int conflux_params_get_probe_interval(void);
++int conflux_params_get_probe_min_bytes(void);
+ uint8_t conflux_params_get_drain_pct(void);
+ uint8_t conflux_params_get_send_pct(void);
+ uint32_t conflux_params_get_max_oooq(void);
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index d481b0a..aa96acb 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1432,6 +1432,9 @@ conflux_predict_new(time_t now)
+  * new stream. */
+ typedef struct conflux_set_candidate_t {
+   origin_circuit_t *ocirc;
++  /** DeltaTor: the conflux set this candidate stands for (used by the measured
++   * throughput policy to read/update its per-set statistics). */
++  conflux_t *cfx;
+   /** Best (lowest) leg RTT in usec, or UINT64_MAX when unknown. */
+   uint64_t best_rtt_usec;
+   /** Number of streams currently attached to the set. */
+@@ -1514,6 +1517,55 @@ conflux_conn_is_keepalive(const entry_connection_t *conn)
+          !strncmp(socks->username, CONFLUX_KEEPALIVE_USERNAME, len);
+ }
+ 
++/** DeltaTor extension: smoothing floor (percent) for the measured-throughput
++ * set-selection policy. Every candidate set weighs at least this percent of the
++ * fastest measured set, so no set is ever starved and each keeps receiving
++ * enough real traffic to stay measurable (this is the implicit, built-in
++ * exploration; there is no separate explore option). */
++#define CONFLUX_MTHR_FLOOR_PCT 10
++
++/** DeltaTor extension: fold a set's elapsed measurement window into its
++ * smoothed throughput estimate. Called lazily when a new stream is placed, so
++ * no timer or per-cell accounting is needed: it only reads the set's existing
++ * cumulative delivered-bytes counter. `now` is in seconds since epoch. */
++static void
++conflux_mthr_roll_window(conflux_t *cfx, time_t now)
++{
++  const uint64_t interval = (uint64_t) conflux_params_get_probe_interval();
++  const uint64_t min_bytes = (uint64_t) conflux_params_get_probe_min_bytes();
++
++  if (cfx->mthr_win_start == 0) {
++    /* First time this set is considered: open a fresh window. */
++    cfx->mthr_win_start = (uint64_t) now;
++    cfx->mthr_prev_recv = cfx->bytes_recv;
++    return;
++  }
++
++  /* Wait until a full window has elapsed (also tolerates a clock going
++   * backwards by simply not rolling). */
++  if (cfx->mthr_win_start > (uint64_t) now ||
++      (uint64_t) now - cfx->mthr_win_start < interval) {
++    return;
++  }
++
++  const uint64_t elapsed = (uint64_t) now - cfx->mthr_win_start;
++  const uint64_t delta = (cfx->bytes_recv >= cfx->mthr_prev_recv) ?
++    cfx->bytes_recv - cfx->mthr_prev_recv : 0;
++
++  cfx->mthr_prev_recv = cfx->bytes_recv;
++  cfx->mthr_win_start = (uint64_t) now;
++
++  if (delta >= min_bytes && elapsed > 0) {
++    const uint64_t bps = delta / elapsed;
++    /* Smooth across windows so a single bursty window does not dominate. */
++    cfx->mthr_bps = (cfx->mthr_bps == 0) ? bps : (cfx->mthr_bps + bps) / 2;
++  } else {
++    /* Too little real traffic this window to trust: decay the estimate so the
++     * set's floor share grows and it is probed again. */
++    cfx->mthr_bps /= 2;
++  }
++}
++
+ /** DeltaTor extension: pick the set to attach a new stream to, honoring the
+  * configured selection policy. If keepalive_balance is true (DeltaTor keep-alive
+  * streams), pick the set with the fewest cumulative streams: a stable,
+@@ -1523,7 +1575,8 @@ conflux_conn_is_keepalive(const entry_connection_t *conn)
+  * hash-ordered and its membership/order changes between calls).
+  * Returns NULL if the list is empty. */
+ static origin_circuit_t *
+-conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance)
++conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance,
++                                 time_t now)
+ {
+   const int n = smartlist_len(cands);
+   if (n == 0) {
+@@ -1562,6 +1615,49 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance)
+           picked = c_sl_idx;
+         }
+       } SMARTLIST_FOREACH_END(c);
++    } else if (policy == CONFLUX_SET_SELECT_MEASURED) {
++      /* DeltaTor: spread new streams across the candidate sets in proportion
++       * to each set's measured real download throughput, plus a small floor so
++       * no set is ever starved and every set keeps getting fresh measurements
++       * (this is what makes the periodic re-test meaningful). The floor is the
++       * built-in exploration: no separate explore option is needed. */
++      SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++        conflux_mthr_roll_window(c->cfx, now);
++      } SMARTLIST_FOREACH_END(c);
++
++      uint64_t max_bps = 0;
++      SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++        if (c->cfx->mthr_bps > max_bps) {
++          max_bps = c->cfx->mthr_bps;
++        }
++      } SMARTLIST_FOREACH_END(c);
++
++      /* Floor = CONFLUX_MTHR_FLOOR_PCT% of the fastest set. With nothing
++       * measured yet every weight is equal, so new streams spread uniformly
++       * and every set is sampled. */
++      uint64_t floor = 1;
++      if (max_bps > 0) {
++        floor = max_bps * CONFLUX_MTHR_FLOOR_PCT / 100;
++        if (floor == 0) {
++          floor = 1;
++        }
++      }
++
++      uint64_t total = 0;
++      SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++        total += c->cfx->mthr_bps + floor;
++      } SMARTLIST_FOREACH_END(c);
++
++      const uint64_t r = crypto_rand_uint64(total);
++      uint64_t acc = 0;
++      bool chose = false;
++      SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++        acc += c->cfx->mthr_bps + floor;
++        if (!chose && r < acc) {
++          picked = c_sl_idx;
++          chose = true;
++        }
++      } SMARTLIST_FOREACH_END(c);
+     } else {
+       /* CONFLUX_SET_SELECT_FIRST and anything unknown: first candidate. */
+       picked = 0;
+@@ -1628,6 +1724,7 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+ 
+     conflux_set_candidate_t *cand = tor_malloc_zero(sizeof(*cand));
+     cand->ocirc = ocirc;
++    cand->cfx = cfx;
+     cand->best_rtt_usec = conflux_set_best_rtt(cfx);
+     cand->num_streams = conflux_set_stream_count(cfx);
+     cand->total_streams = cfx->total_streams;
+@@ -1643,9 +1740,12 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+   origin_circuit_t *picked = NULL;
+ 
+   /* Apply the slow-set RTT filter for failover, but never empty the list: if
+-   * every set is slow we still have to attach somewhere. */
++   * every set is slow we still have to attach somewhere. The measured-throughput
++   * policy needs every set to receive traffic, so it ignores the RTT filters. */
++  const int policy = conflux_params_get_set_selection();
+   const int rtt_max_ms = conflux_params_get_set_rtt_max();
+-  if (!keepalive && rtt_max_ms > 0 && smartlist_len(cands) > 1) {
++  if (!keepalive && policy != CONFLUX_SET_SELECT_MEASURED &&
++      rtt_max_ms > 0 && smartlist_len(cands) > 1) {
+     const uint64_t rtt_max_usec = (uint64_t)rtt_max_ms * 1000;
+     SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+       if (c->best_rtt_usec >= rtt_max_usec) {
+@@ -1660,7 +1760,8 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+    * absolute threshold, this never empties the list: at least one set is kept
+    * so a new stream can always attach somewhere. */
+   const int rtt_pct = conflux_params_get_set_rtt_pct();
+-  if (!keepalive && rtt_pct > 0 && smartlist_len(cands) > 1) {
++  if (!keepalive && policy != CONFLUX_SET_SELECT_MEASURED &&
++      rtt_pct > 0 && smartlist_len(cands) > 1) {
+     smartlist_sort(cands, conflux_cand_rtt_asc_cmp);
+     size_t keep = (size_t)(((int64_t)smartlist_len(cands) * rtt_pct) / 100);
+     if (keep == 0) {
+@@ -1672,7 +1773,7 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+     }
+   }
+ 
+-  picked = conflux_pick_set_from_candidates(cands, keepalive);
++  picked = conflux_pick_set_from_candidates(cands, keepalive, now);
+ 
+   SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+     tor_free(c);
+diff --git a/src/core/or/conflux_st.h b/src/core/or/conflux_st.h
+index 9bed3e2..fd531a2 100644
+--- a/src/core/or/conflux_st.h
++++ b/src/core/or/conflux_st.h
+@@ -147,6 +147,14 @@ struct conflux_t {
+   uint64_t bytes_sent;
+   uint64_t bytes_recv;
+ 
++  /** DeltaTor: measured-throughput selection (ConfluxSetSelection 4) state.
++   * Wall-clock start (seconds since epoch; 0 = window not opened yet) of the
++   * current measurement window, the set's cumulative delivered-bytes snapshot
++   * at that point, and the smoothed delivered bytes/sec over recent windows. */
++  uint64_t mthr_win_start;
++  uint64_t mthr_prev_recv;
++  uint64_t mthr_bps;
++
+   /**
+    * PolicyHint: Predicted ports/protocol shorthand..
+    *
+-- 
+2.56.0.windows.2
+
