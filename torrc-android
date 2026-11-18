@@ -51,11 +51,11 @@ SocksTimeout 30
 # below (they still apply if you switch back to modes 2/3). Raising
 # ConfluxProbeInterval to 60 makes selection adapt more slowly but is otherwise
 # free: measurement reuses the traffic you already send, it adds no downloads.
-ConfluxNumSets 12
-ConfluxNumLinkedSets 12
+ConfluxNumSets 16
+ConfluxNumLinkedSets 16
 ConfluxNumLegs 4
 ConfluxSetSelection 4
-ConfluxProbeInterval 30
+ConfluxProbeInterval 20
 ConfluxProbeMinBytes 32768
 # Diagnostics for the measured-throughput mechanism: 0 = off (normal use),
 # 1 = log every measurement window, per-set throughput, candidate weight and the
@@ -67,7 +67,7 @@ ConfluxProbeMinBytes 32768
 # file, use a target such as:
 #   Log [confluxmthr]notice file conflux-probe.log
 ConfluxProbeLog 0
-ConfluxSetRttPct 33
+ConfluxSetRttPct 25
 # With more than two legs per set (ConfluxNumLegs above), upstream's conflux
 # scheduler wants cfx_drain_pct 100 so a leg can be switched away from as soon
 # as its in-flight data drains; otherwise switching is blocked.
