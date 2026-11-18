@@ -84,6 +84,7 @@ jobs:
           curl -fsSL -o work/libevent.tar.gz https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz
           tar -C work -xzf work/libevent.tar.gz
           cmake -S work/libevent-2.1.12-stable -B work/libevent-build \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=${{ matrix.abi }} \
             -DANDROID_PLATFORM=android-24 \
