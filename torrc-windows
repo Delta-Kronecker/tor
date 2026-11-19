@@ -71,16 +71,16 @@ SocksTimeout 120
 # zero). Mode 6 is the hybrid: it behaves exactly like mode 4 (weighted, and
 # re-weighted every ConfluxProbeWarmupInterval from the cumulative data) until
 # every set has been measured once, then exactly like mode 5 (fastest set only).
-ConfluxNumSets 16
-ConfluxNumLinkedSets 16
+ConfluxNumSets 32
+ConfluxNumLinkedSets 32
 ConfluxNumLegs 4
 ConfluxSetSelection 4
-ConfluxProbeInterval 20
+ConfluxProbeInterval 120
 # Optional warm-up: while the first ConfluxProbeInterval is still running,
 # refresh each set's estimate every N seconds (from the cumulative bytes and
 # active time since the window opened, not just the last slice) so selection
 # adapts before the first full window. 0 = off; uncomment to enable.
-# ConfluxProbeWarmupInterval 5
+ConfluxProbeWarmupInterval 2
 ConfluxProbeMinBytes 32768
 # Diagnostics for the measured-throughput mechanism: 0 = off (normal use),
 # 1 = log every measurement window, per-set throughput, candidate weight and the
