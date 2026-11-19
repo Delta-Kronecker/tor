@@ -49,10 +49,13 @@ SocksTimeout 30
 # with a built-in 10% floor so no set is starved and every set keeps getting
 # enough traffic to stay measurable. The measurement window is re-taken every
 # ConfluxProbeInterval seconds; a set must move at least ConfluxProbeMinBytes
-# in a window for its estimate to be trusted. Mode 4 ignores the RTT filters
-# below (they still apply if you switch back to modes 2/3). Mode 5 uses the
-# same measurement but sends every new stream to the fastest set instead, with
-# no floor, so only that set keeps getting traffic (until it decays to zero).
+# in a window for its estimate to be trusted. Modes 4/5/6 ignore the RTT
+# filters below (they still apply if you switch back to modes 2/3). Mode 5 uses
+# the same measurement but sends every new stream to the fastest set instead,
+# with no floor, so only that set keeps getting traffic (until it decays to
+# zero). Mode 6 is the hybrid: it behaves exactly like mode 4 (weighted, and
+# re-weighted every ConfluxProbeWarmupInterval from the cumulative data) until
+# every set has been measured once, then exactly like mode 5 (fastest set only).
 # Raising
 # ConfluxProbeInterval to 60 makes selection adapt more slowly but is otherwise
 # free: measurement reuses the traffic you already send, it adds no downloads.
