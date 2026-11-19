@@ -59,11 +59,11 @@ SocksTimeout 30
 # Raising
 # ConfluxProbeInterval to 60 makes selection adapt more slowly but is otherwise
 # free: measurement reuses the traffic you already send, it adds no downloads.
-ConfluxNumSets 16
-ConfluxNumLinkedSets 16
+ConfluxNumSets 32
+ConfluxNumLinkedSets 32
 ConfluxNumLegs 4
 ConfluxSetSelection 4
-ConfluxProbeInterval 20
+ConfluxProbeInterval 120
 # Optional warm-up: while the first ConfluxProbeInterval is still running,
 # refresh each set's estimate every N seconds (from the cumulative bytes and
 # active time since the window opened, not just the last slice) so selection
