@@ -68,7 +68,7 @@ ConfluxProbeInterval 20
 # refresh each set's estimate every N seconds (from the cumulative bytes and
 # active time since the window opened, not just the last slice) so selection
 # adapts before the first full window. 0 = off; uncomment to enable.
-# ConfluxProbeWarmupInterval 5
+ConfluxProbeWarmupInterval 2
 ConfluxProbeMinBytes 32768
 # Diagnostics for the measured-throughput mechanism: 0 = off (normal use),
 # 1 = log every measurement window, per-set throughput, candidate weight and the
