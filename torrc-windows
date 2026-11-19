@@ -65,12 +65,19 @@ SocksTimeout 120
 # enough traffic to stay measurable. The measurement window is re-taken every
 # ConfluxProbeInterval seconds; a set must move at least ConfluxProbeMinBytes
 # in a window for its estimate to be trusted. Mode 4 ignores the RTT filters
-# below (they still apply if you switch back to modes 2/3).
+# below (they still apply if you switch back to modes 2/3). Mode 5 uses the
+# same measurement but sends every new stream to the fastest set instead, with
+# no floor, so only that set keeps getting traffic (until it decays to zero).
 ConfluxNumSets 16
 ConfluxNumLinkedSets 16
 ConfluxNumLegs 4
 ConfluxSetSelection 4
 ConfluxProbeInterval 20
+# Optional warm-up: while the first ConfluxProbeInterval is still running,
+# refresh each set's estimate every N seconds (from the cumulative bytes and
+# active time since the window opened, not just the last slice) so selection
+# adapts before the first full window. 0 = off; uncomment to enable.
+# ConfluxProbeWarmupInterval 5
 ConfluxProbeMinBytes 32768
 # Diagnostics for the measured-throughput mechanism: 0 = off (normal use),
 # 1 = log every measurement window, per-set throughput, candidate weight and the

@@ -1,0 +1,421 @@
+From 2390b438381cee3af7c85ab27456cb6f6ef08c22 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Thu, 19 Nov 2026 04:23:01 +0330
+Subject: [PATCH 39/40] conflux: add ConfluxSetSelection 5, give every stream
+ to the fastest set
+
+ConfluxSetSelection already has a mode (4) that spreads new streams in
+proportion to each set's measured download throughput, with a 10% floor so no
+set is starved. Add mode 5, which uses the same measurement but is pure
+exploit: every new stream goes to the set with the highest measured throughput,
+with no floor and no weighted spread.
+
+The consequence is deliberate: the current leader keeps all new streams until
+its estimate decays to zero, at which point the whole pool is back at 0 B/s and
+mode 5 falls back to spreading new streams uniformly at random so every set is
+sampled again and a new fastest set can be found. That fallback also covers the
+first seconds after startup, before anything has been measured. Mode 5 keeps
+bypassing the ConfluxSetRttMax/ConfluxSetRttPct filters, as mode 4 does, so all
+sets remain measurable.
+
+The ConfluxProbeLog diagnostics follow both modes: the candidate-table printing
+moves into a shared helper, exploit picks get their own pick line, and the
+periodic level-3 summary drops the floor/total-weight fields in exploit mode.
+---
+ doc/DELTATOR-CHANGES.md        |   6 +-
+ doc/man/tor.1.txt              |  20 ++--
+ src/app/config/config.c        |   6 +-
+ src/app/config/or_options_st.h |   4 +-
+ src/core/or/conflux_params.c   |   3 +-
+ src/core/or/conflux_params.h   |   6 ++
+ src/core/or/conflux_pool.c     | 181 +++++++++++++++++++++++++--------
+ 7 files changed, 167 insertions(+), 59 deletions(-)
+
+diff --git a/doc/DELTATOR-CHANGES.md b/doc/DELTATOR-CHANGES.md
+index 0f92357..b1bbd2d 100644
+--- a/doc/DELTATOR-CHANGES.md
++++ b/doc/DELTATOR-CHANGES.md
+@@ -14,12 +14,12 @@ All options are validated in `src/app/config/config.c` and documented in
+ | `ConfluxNumSets` | 0-32 | Sets kept alive; overrides consensus `cfx_max_prebuilt_set`/`cfx_max_linked_set` |
+ | `ConfluxNumLegs` | 0-16 | Legs built per set; overrides consensus `cfx_num_legs_set` |
+ | `ConfluxNumLinkedSets` | 0-32 | Ceiling on *linked* sets; binds only when below `ConfluxNumSets` |
+-| `ConfluxSetSelection` | 0-4 | Set pick policy for new streams: first / round-robin / least-streams / fastest / measured-throughput |
++| `ConfluxSetSelection` | 0-5 | Set pick policy for new streams: first / round-robin / least-streams / fastest / measured-throughput / measured-throughput-fastest (every new stream to the fastest measured set) |
+ | `ConfluxSetRttMax` | >= 0 ms | Skip sets whose best-leg RTT is at/above this (never empties the candidate list) |
+ | `ConfluxSetRttPct` | 0-100 % | Restrict new streams to the best N% of sets by RTT (keeps at least one set) |
+-| `ConfluxProbeInterval` | 0-3600 s | Measurement window for `ConfluxSetSelection 4`; every window all sets' real download throughput is re-estimated over the time each set actually moved bytes (0 = 30 s) |
++| `ConfluxProbeInterval` | 0-3600 s | Measurement window for `ConfluxSetSelection 4` and `5`; every window all sets' real download throughput is re-estimated over the time each set actually moved bytes (0 = 30 s) |
+ | `ConfluxProbeMinBytes` | >= 0 bytes | Minimum delivered bytes per window before a set's throughput estimate is trusted (0 = 32768) |
+-| `ConfluxProbeLog` | 0-3 | Diagnostics for the measured-throughput selection: 0 = off, 1 = log the mechanism (unchanged candidate tables are collapsed to one line), 2 = log only the mechanism (suppress tor's other log lines; errors kept), 3 = quiet: only a summary line per minute |
++| `ConfluxProbeLog` | 0-3 | Diagnostics for the measured-throughput selection (4 and 5): 0 = off, 1 = log the mechanism (unchanged candidate tables are collapsed to one line), 2 = log only the mechanism (suppress tor's other log lines; errors kept), 3 = quiet: only a summary line per minute |
+ | `ConfluxDrainPct` | 0-255 | Leg drain percent before a leg switch is allowed; 100 lets a leg be swapped as soon as its in-flight data drains |
+ | `ConfluxLowExitThreshold` | 0-100 % | Exit-support ratio below which only one prebuilt set is built; 1 keeps the full ConfluxNumSets pool |
+ | `ConfluxMaxOooqBytes` | >= 0 bytes | Max bytes buffered per conflux out-of-order queue before the set is closed (0 = consensus default) |
+diff --git a/doc/man/tor.1.txt b/doc/man/tor.1.txt
+index 07b18c7..dbcf895 100644
+--- a/doc/man/tor.1.txt
++++ b/doc/man/tor.1.txt
+@@ -395,11 +395,17 @@ forward slash (/) in the configuration file and on the command line.
+     DeltaTor extension: policy used when attaching a new stream to a conflux
+     set. 0 = first acceptable set, 1 = round-robin across sets,
+     2 = set with fewest streams, 3 = set with lowest best-leg RTT,
+-    4 = weighted by each set's measured real download throughput. Mode 4
+-    spreads new streams in proportion to the delivered bytes/sec recently
+-    observed on each set, with a built-in 10% floor so no set is starved and
+-    every set keeps getting the real traffic needed to stay measurable; the
+-    measurement is re-taken every ConfluxProbeInterval seconds and ignores the
++    4 = weighted by each set's measured real download throughput, 5 = the set
++    with the highest measured real download throughput only. Mode 4 spreads new
++    streams in proportion to the delivered bytes/sec recently observed on each
++    set, with a built-in 10% floor so no set is starved and every set keeps
++    getting the real traffic needed to stay measurable. Mode 5 has no floor and
++    no weighted spread: every new stream goes to the current fastest set, so
++    that set keeps all the traffic. Until any set has a measurement (all sets at
++    0 B/s, for example just after startup or after the whole pool went idle and
++    decayed) mode 5 spreads new streams uniformly at random so every set is
++    sampled and a fastest one can be found. In both modes the measurement is
++    re-taken every ConfluxProbeInterval seconds and ignores the
+     ConfluxSetRttMax/ConfluxSetRttPct filters so all sets get sampled.
+     (Default: 1)
+ 
+@@ -417,7 +423,7 @@ forward slash (/) in the configuration file and on the command line.
+ 
+ [[ConfluxProbeInterval]] **ConfluxProbeInterval** __NUM__::
+     DeltaTor extension: measurement window, in seconds, used by
+-    ConfluxSetSelection 4. Every window each set's real delivered download
++    ConfluxSetSelection 4 and 5. Every window each set's real delivered download
+     throughput is re-estimated, so the fastest set is re-discovered and slow
+     sets are given another chance. Because a window is only rolled when a new
+     stream is placed, the throughput is measured over the part of the window in
+@@ -433,7 +439,7 @@ forward slash (/) in the configuration file and on the command line.
+ 
+ [[ConfluxProbeLog]] **ConfluxProbeLog** __NUM__::
+     DeltaTor extension: diagnostics for the measured-throughput set selection
+-    (ConfluxSetSelection 4). 0 = off, 1 = log everything the mechanism does
++    (ConfluxSetSelection 4 and 5). 0 = off, 1 = log everything the mechanism does
+     (measurement windows, per-set throughput, candidate weights and the set it
+     picks) alongside tor's own log lines, 2 = log the same mechanism lines but
+     suppress all other tor log lines (errors are still shown), so the mechanism
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index f3c5829..5af7b99 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -3688,10 +3688,10 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+     REJECT("ConfluxNumLinkedSets must be between 0 (consensus default) and 32");
+   }
+ 
+-  if (options->ConfluxSetSelection < 0 || options->ConfluxSetSelection > 4) {
+-    REJECT("ConfluxSetSelection must be between 0 and 4 "
++  if (options->ConfluxSetSelection < 0 || options->ConfluxSetSelection > 5) {
++    REJECT("ConfluxSetSelection must be between 0 and 5 "
+            "(0=first, 1=round-robin, 2=least-streams, 3=fastest, "
+-           "4=measured-throughput)");
++           "4=measured-throughput, 5=measured-throughput, fastest set only)");
+   }
+ 
+   if (options->ConfluxSetRttMax < 0) {
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index e6c4e92..1528e72 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -798,7 +798,9 @@ struct or_options_t {
+    * acceptable sets, 2 = the set with the fewest attached streams,
+    * 3 = the set with the lowest best-leg RTT, 4 = weighted by each set's
+    * measured real download throughput (no set is starved; see
+-   * ConfluxProbeInterval and ConfluxProbeMinBytes). */
++   * ConfluxProbeInterval and ConfluxProbeMinBytes), 5 = the set with the
++   * highest measured throughput only (pure exploit; until something is
++   * measured, streams are spread uniformly at random). */
+   int ConfluxSetSelection;
+ 
+   /** DeltaTor extension: skip a conflux set when choosing one for a new stream
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index 1a603d1..3824850 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -251,7 +251,8 @@ conflux_params_set_num_legs(uint8_t n)
+ 
+ /** DeltaTor extension: return the set-selection policy for new streams.
+  * 0 = first acceptable, 1 = round-robin, 2 = least-streams, 3 = fastest,
+- * 4 = measured-throughput (weighted by real download speed). */
++ * 4 = measured-throughput (weighted by real download speed),
++ * 5 = measured-throughput pure exploit (all streams to the fastest set). */
+ int
+ conflux_params_get_set_selection(void)
+ {
+diff --git a/src/core/or/conflux_params.h b/src/core/or/conflux_params.h
+index 31ff886..73c5580 100644
+--- a/src/core/or/conflux_params.h
++++ b/src/core/or/conflux_params.h
+@@ -19,6 +19,12 @@ typedef enum conflux_set_select_t {
+   CONFLUX_SET_SELECT_FASTEST = 3,
+   /** DeltaTor: weighted by each set's measured real download throughput. */
+   CONFLUX_SET_SELECT_MEASURED = 4,
++  /** DeltaTor: pure exploit. Give every new stream to the set with the highest
++   * measured real download throughput, with no weighted spread and no floor.
++   * Until any set has a measurement (all 0 B/s, e.g. just after startup), new
++   * streams are spread uniformly at random so every set is sampled and a
++   * fastest one can be found. */
++  CONFLUX_SET_SELECT_MEASURED_FASTEST = 5,
+ } conflux_set_select_t;
+ 
+ bool conflux_is_enabled(const struct circuit_t *circ);
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index cbb22ec..228ef71 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1547,6 +1547,17 @@ conflux_mthr_detailed_logs(int probe_log)
+   return probe_log == 1 || probe_log == 2;
+ }
+ 
++/** DeltaTor extension: true for the measured-throughput selection policies
++ * (4 = weighted spread by measured throughput, 5 = pure exploit of the fastest
++ * measured set). Both ignore the ConfluxSetRttMax/ConfluxSetRttPct filters so
++ * every acceptable set keeps being measured and can become the fastest. */
++static bool
++conflux_policy_is_measured(int policy)
++{
++  return policy == CONFLUX_SET_SELECT_MEASURED ||
++         policy == CONFLUX_SET_SELECT_MEASURED_FASTEST;
++}
++
+ /** DeltaTor extension: state used to collapse repeated "candidate" lines.
+  * Printing every candidate on every pick was what made levels 1 and 2 so
+  * large; while the table (set ids and measured throughput) is unchanged one
+@@ -1572,6 +1583,45 @@ conflux_mthr_table_digest(const smartlist_t *cands)
+   return h;
+ }
+ 
++/** DeltaTor extension: log the candidate table for the detailed levels, or a
++ * single "unchanged" line while it repeats. `weights` is true for the weighted
++ * measured-throughput policy (each set also prints the weight it was given);
++ * false for the pure-exploit policy, where only the measured throughput
++ * matters. The floor is only used to compute the printed weights. */
++static void
++conflux_mthr_log_candidates(const smartlist_t *cands, int n, bool weights,
++                            uint64_t floor)
++{
++  const uint64_t digest = conflux_mthr_table_digest(cands);
++  if (conflux_mthr_table.valid && digest == conflux_mthr_table.digest &&
++      conflux_mthr_table.n == n) {
++    conflux_mthr_table.repeats++;
++    log_notice(LD_CONFLUXMTHR,
++               "ConfluxProbe candidates unchanged: sets=%d digest=%"PRIu64
++               " repeated=%"PRIu64,
++               n, digest, conflux_mthr_table.repeats);
++    return;
++  }
++
++  SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++    if (weights) {
++      log_notice(LD_CONFLUXMTHR,
++                 "ConfluxProbe candidate set#%"PRIu64" bps=%"PRIu64"B/s "
++                 "weight=%"PRIu64,
++                 c->cfx->mthr_id, c->cfx->mthr_bps, c->cfx->mthr_bps + floor);
++    } else {
++      log_notice(LD_CONFLUXMTHR,
++                 "ConfluxProbe candidate set#%"PRIu64" bps=%"PRIu64"B/s",
++                 c->cfx->mthr_id, c->cfx->mthr_bps);
++    }
++  } SMARTLIST_FOREACH_END(c);
++
++  conflux_mthr_table.valid = true;
++  conflux_mthr_table.digest = digest;
++  conflux_mthr_table.n = n;
++  conflux_mthr_table.repeats = 0;
++}
++
+ /** DeltaTor extension: record that the given set delivered payload bytes right
+  * now. Called from the data path (once per delivered relay cell) so the
+  * measured-throughput probe can tell how long a set was really busy instead of
+@@ -1699,10 +1749,13 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+ /** DeltaTor extension: emit the periodic ConfluxProbeLog 3 summary line, which
+  * replaces the per-event lines of levels 1 and 2. Like the rest of the probe it
+  * is produced lazily, when a stream is placed, so the line appears at most once
+- * per CONFLUX_MTHR_SUMMARY_SECS and only while the client is active. */
++ * per CONFLUX_MTHR_SUMMARY_SECS and only while the client is active. `weighted`
++ * selects the weighted-policy wording (floor and total weight) versus the
++ * pure-exploit wording; floor/total are ignored when it is false. */
+ static void
+-conflux_mthr_maybe_log_summary(const smartlist_t *cands, int n, uint64_t floor,
+-                               uint64_t total, uint64_t chosen_id, time_t now)
++conflux_mthr_maybe_log_summary(const smartlist_t *cands, int n, bool weighted,
++                               uint64_t floor, uint64_t total,
++                               uint64_t chosen_id, time_t now)
+ {
+   if (conflux_mthr_stats.since == 0) {
+     conflux_mthr_stats.since = now;
+@@ -1727,17 +1780,30 @@ conflux_mthr_maybe_log_summary(const smartlist_t *cands, int n, uint64_t floor,
+     }
+   } SMARTLIST_FOREACH_END(c);
+ 
+-  log_notice(LD_CONFLUXMTHR,
+-             "ConfluxProbe summary: t=%"PRIu64"s windows=%"PRIu64" "
+-             "rolls=%"PRIu64" (trusted=%"PRIu64" decayed=%"PRIu64") "
+-             "picks=%"PRIu64" candidates=%d top=set#%"PRIu64" "
+-             "top_bps=%"PRIu64"B/s floor=%"PRIu64" total_weight=%"PRIu64" "
+-             "zero_sets=%d last=set#%"PRIu64,
+-             (uint64_t)(now - conflux_mthr_stats.since),
+-             conflux_mthr_stats.windows, conflux_mthr_stats.rolls,
+-             conflux_mthr_stats.trusted, conflux_mthr_stats.decayed,
+-             conflux_mthr_stats.picks, n, top_id, top_bps, floor, total, zero,
+-             chosen_id);
++  if (weighted) {
++    log_notice(LD_CONFLUXMTHR,
++               "ConfluxProbe summary: t=%"PRIu64"s windows=%"PRIu64" "
++               "rolls=%"PRIu64" (trusted=%"PRIu64" decayed=%"PRIu64") "
++               "picks=%"PRIu64" candidates=%d top=set#%"PRIu64" "
++               "top_bps=%"PRIu64"B/s floor=%"PRIu64" total_weight=%"PRIu64" "
++               "zero_sets=%d last=set#%"PRIu64,
++               (uint64_t)(now - conflux_mthr_stats.since),
++               conflux_mthr_stats.windows, conflux_mthr_stats.rolls,
++               conflux_mthr_stats.trusted, conflux_mthr_stats.decayed,
++               conflux_mthr_stats.picks, n, top_id, top_bps, floor, total, zero,
++               chosen_id);
++  } else {
++    log_notice(LD_CONFLUXMTHR,
++               "ConfluxProbe summary: t=%"PRIu64"s windows=%"PRIu64" "
++               "rolls=%"PRIu64" (trusted=%"PRIu64" decayed=%"PRIu64") "
++               "picks=%"PRIu64" candidates=%d top=set#%"PRIu64" "
++               "top_bps=%"PRIu64"B/s (exploit) zero_sets=%d last=set#%"PRIu64,
++               (uint64_t)(now - conflux_mthr_stats.since),
++               conflux_mthr_stats.windows, conflux_mthr_stats.rolls,
++               conflux_mthr_stats.trusted, conflux_mthr_stats.decayed,
++               conflux_mthr_stats.picks, n, top_id, top_bps, zero,
++               chosen_id);
++  }
+ 
+   memset(&conflux_mthr_stats, 0, sizeof(conflux_mthr_stats));
+   conflux_mthr_stats.since = now;
+@@ -1770,15 +1836,15 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance,
+   static bool mthr_logged_startup = false;
+   if (probe_log && !mthr_logged_startup) {
+     mthr_logged_startup = true;
+-    if (policy == CONFLUX_SET_SELECT_MEASURED) {
++    if (conflux_policy_is_measured(policy)) {
+       log_notice(LD_CONFLUXMTHR,
+                  "ConfluxProbe enabled: ConfluxProbeLog=%d, "
+-                 "ConfluxSetSelection=4 (measured-throughput set selection)",
+-                 probe_log);
++                 "ConfluxSetSelection=%d (measured-throughput set selection)",
++                 probe_log, policy);
+     } else {
+       log_notice(LD_CONFLUXMTHR,
+                  "ConfluxProbe enabled: ConfluxProbeLog=%d but "
+-                 "ConfluxSetSelection=%d (not 4); measured-throughput "
++                 "ConfluxSetSelection=%d (not 4 or 5); measured-throughput "
+                  "selection is not active, so no probe traffic is produced",
+                  probe_log, policy);
+     }
+@@ -1849,28 +1915,7 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance,
+       const uint64_t r = crypto_rand_uint64(total);
+ 
+       if (conflux_mthr_detailed_logs(probe_log)) {
+-        const uint64_t digest = conflux_mthr_table_digest(cands);
+-        if (conflux_mthr_table.valid &&
+-            digest == conflux_mthr_table.digest &&
+-            conflux_mthr_table.n == n) {
+-          conflux_mthr_table.repeats++;
+-          log_notice(LD_CONFLUXMTHR,
+-                     "ConfluxProbe candidates unchanged: sets=%d digest=%"
+-                     PRIu64 " repeated=%"PRIu64,
+-                     n, digest, conflux_mthr_table.repeats);
+-        } else {
+-          SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+-            log_notice(LD_CONFLUXMTHR,
+-                       "ConfluxProbe candidate set#%"PRIu64" bps=%"PRIu64"B/s "
+-                       "weight=%"PRIu64,
+-                       c->cfx->mthr_id, c->cfx->mthr_bps,
+-                       c->cfx->mthr_bps + floor);
+-          } SMARTLIST_FOREACH_END(c);
+-          conflux_mthr_table.valid = true;
+-          conflux_mthr_table.digest = digest;
+-          conflux_mthr_table.n = n;
+-          conflux_mthr_table.repeats = 0;
+-        }
++        conflux_mthr_log_candidates(cands, n, true, floor);
+         log_notice(LD_CONFLUXMTHR,
+                    "ConfluxProbe pick: candidates=%d max_bps=%"PRIu64"B/s "
+                    "floor=%"PRIu64" total_weight=%"PRIu64" roll=%"PRIu64,
+@@ -1895,7 +1940,55 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance,
+                      "ConfluxProbe chose set#%"PRIu64" bps=%"PRIu64"B/s",
+                      chosen->cfx->mthr_id, chosen->cfx->mthr_bps);
+         } else {
+-          conflux_mthr_maybe_log_summary(cands, n, floor, total,
++          conflux_mthr_maybe_log_summary(cands, n, true, floor, total,
++                                         chosen->cfx->mthr_id, now);
++        }
++      }
++    } else if (policy == CONFLUX_SET_SELECT_MEASURED_FASTEST) {
++      /* DeltaTor: pure exploit. Roll every candidate's window and send every
++       * new stream to the set with the highest measured throughput. There is no
++       * floor and no weighted spread, so the leader keeps getting all the new
++       * streams. While nothing has been measured yet (every set at 0 B/s, for
++       * example right after startup, or after the whole pool went idle and its
++       * estimates decayed to zero) new streams are spread uniformly at random
++       * so every set is sampled and a fastest one can be found. */
++      SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++        conflux_mthr_roll_window(c->cfx, now);
++      } SMARTLIST_FOREACH_END(c);
++
++      uint64_t max_bps = 0;
++      int fastest = 0;
++      SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
++        if (c->cfx->mthr_bps > max_bps) {
++          max_bps = c->cfx->mthr_bps;
++          fastest = c_sl_idx;
++        }
++      } SMARTLIST_FOREACH_END(c);
++
++      if (max_bps == 0) {
++        picked = (int)crypto_rand_uint64((uint64_t)n);
++      } else {
++        picked = fastest;
++      }
++
++      if (conflux_mthr_detailed_logs(probe_log)) {
++        conflux_mthr_log_candidates(cands, n, false, 0);
++        log_notice(LD_CONFLUXMTHR,
++                   "ConfluxProbe exploit pick: candidates=%d max_bps=%"PRIu64
++                   "B/s chosen=set#%"PRIu64,
++                   n, max_bps,
++                   smartlist_get(cands, picked)->cfx->mthr_id);
++      }
++
++      if (probe_log) {
++        const conflux_set_candidate_t *chosen = smartlist_get(cands, picked);
++        conflux_mthr_stats.picks++;
++        if (conflux_mthr_detailed_logs(probe_log)) {
++          log_notice(LD_CONFLUXMTHR,
++                     "ConfluxProbe chose set#%"PRIu64" bps=%"PRIu64"B/s",
++                     chosen->cfx->mthr_id, chosen->cfx->mthr_bps);
++        } else {
++          conflux_mthr_maybe_log_summary(cands, n, false, 0, 0,
+                                          chosen->cfx->mthr_id, now);
+         }
+       }
+@@ -1982,10 +2075,10 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+ 
+   /* Apply the slow-set RTT filter for failover, but never empty the list: if
+    * every set is slow we still have to attach somewhere. The measured-throughput
+-   * policy needs every set to receive traffic, so it ignores the RTT filters. */
++   * policies need every set to receive traffic, so they ignore the RTT filters. */
+   const int policy = conflux_params_get_set_selection();
+   const int rtt_max_ms = conflux_params_get_set_rtt_max();
+-  if (!keepalive && policy != CONFLUX_SET_SELECT_MEASURED &&
++  if (!keepalive && !conflux_policy_is_measured(policy) &&
+       rtt_max_ms > 0 && smartlist_len(cands) > 1) {
+     const uint64_t rtt_max_usec = (uint64_t)rtt_max_ms * 1000;
+     SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+@@ -2001,7 +2094,7 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
+    * absolute threshold, this never empties the list: at least one set is kept
+    * so a new stream can always attach somewhere. */
+   const int rtt_pct = conflux_params_get_set_rtt_pct();
+-  if (!keepalive && policy != CONFLUX_SET_SELECT_MEASURED &&
++  if (!keepalive && !conflux_policy_is_measured(policy) &&
+       rtt_pct > 0 && smartlist_len(cands) > 1) {
+     smartlist_sort(cands, conflux_cand_rtt_asc_cmp);
+     size_t keep = (size_t)(((int64_t)smartlist_len(cands) * rtt_pct) / 100);
+-- 
+2.56.0.windows.2
+

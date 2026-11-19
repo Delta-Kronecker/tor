@@ -1,0 +1,312 @@
+From 8a4a7e8fe426692da822390a398454c989465510 Mon Sep 17 00:00:00 2001
+From: DeltaTor <deltator@example.com>
+Date: Thu, 19 Nov 2026 04:31:32 +0330
+Subject: [PATCH 40/40] conflux: add a warm-up re-measurement interval for the
+ probe
+
+Add ConfluxProbeWarmupInterval. While a set's first ConfluxProbeInterval is
+still running, its throughput estimate is now refreshed at most every
+ConfluxProbeWarmupInterval seconds instead of only when the full first window
+has elapsed, so the measured-throughput policies can start adapting shortly
+after startup.
+
+Each early refresh deliberately uses the cumulative delivered bytes and active
+time since the window opened, not the short slice since the previous refresh: a
+few seconds of traffic are too noisy to trust on their own, and the point of
+the warm-up is to give selection an early but already-stable estimate. The
+baseline and the window start are not advanced, so the first normal roll still
+measures the whole first ConfluxProbeInterval, after which the previous rolling
+logic continues unchanged.
+
+The warm-up never decays an estimate; a set that has not yet moved
+ConfluxProbeMinBytes simply keeps its previous value. It is off by default (0),
+so existing behaviour is unchanged.
+---
+ doc/DELTATOR-CHANGES.md        |  1 +
+ doc/man/tor.1.txt              | 12 +++++
+ src/app/config/config.c        |  7 +++
+ src/app/config/or_options_st.h |  9 ++++
+ src/core/or/conflux_params.c   | 14 +++++
+ src/core/or/conflux_params.h   |  1 +
+ src/core/or/conflux_pool.c     | 94 +++++++++++++++++++++++++++-------
+ src/core/or/conflux_st.h       |  7 +++
+ 8 files changed, 126 insertions(+), 19 deletions(-)
+
+diff --git a/doc/DELTATOR-CHANGES.md b/doc/DELTATOR-CHANGES.md
+index b1bbd2d..b3ac5a5 100644
+--- a/doc/DELTATOR-CHANGES.md
++++ b/doc/DELTATOR-CHANGES.md
+@@ -19,6 +19,7 @@ All options are validated in `src/app/config/config.c` and documented in
+ | `ConfluxSetRttPct` | 0-100 % | Restrict new streams to the best N% of sets by RTT (keeps at least one set) |
+ | `ConfluxProbeInterval` | 0-3600 s | Measurement window for `ConfluxSetSelection 4` and `5`; every window all sets' real download throughput is re-estimated over the time each set actually moved bytes (0 = 30 s) |
+ | `ConfluxProbeMinBytes` | >= 0 bytes | Minimum delivered bytes per window before a set's throughput estimate is trusted (0 = 32768) |
++| `ConfluxProbeWarmupInterval` | 0-3600 s | Early re-measurement interval for `ConfluxSetSelection 4` and `5`: while a set's first `ConfluxProbeInterval` is still running, refresh its estimate (from cumulative bytes/active time since the window opened) at most this often, so selection adapts before the first full window (0 = off) |
+ | `ConfluxProbeLog` | 0-3 | Diagnostics for the measured-throughput selection (4 and 5): 0 = off, 1 = log the mechanism (unchanged candidate tables are collapsed to one line), 2 = log only the mechanism (suppress tor's other log lines; errors kept), 3 = quiet: only a summary line per minute |
+ | `ConfluxDrainPct` | 0-255 | Leg drain percent before a leg switch is allowed; 100 lets a leg be swapped as soon as its in-flight data drains |
+ | `ConfluxLowExitThreshold` | 0-100 % | Exit-support ratio below which only one prebuilt set is built; 1 keeps the full ConfluxNumSets pool |
+diff --git a/doc/man/tor.1.txt b/doc/man/tor.1.txt
+index dbcf895..5fd3212 100644
+--- a/doc/man/tor.1.txt
++++ b/doc/man/tor.1.txt
+@@ -431,6 +431,18 @@ forward slash (/) in the configuration file and on the command line.
+     unused set look slow. 0 uses the internal default of 30. Valid range:
+     0-3600. (Default: 0)
+ 
++[[ConfluxProbeWarmupInterval]] **ConfluxProbeWarmupInterval** __NUM__::
++    DeltaTor extension: early re-measurement interval, in seconds, for
++    ConfluxSetSelection 4 and 5. Until a set's first ConfluxProbeInterval has
++    elapsed, its throughput estimate is refreshed at most this often instead of
++    waiting for the full first window, so selection starts adapting sooner.
++    Each early refresh uses the cumulative delivered bytes and active time since
++    the window opened, not the short slice since the previous refresh, so a few
++    seconds of data are never trusted on their own. Once the full
++    ConfluxProbeInterval has elapsed the normal per-window measurement takes
++    over. 0 disables the warm-up. It only has an effect when it is smaller than
++    ConfluxProbeInterval. Valid range: 0-3600. (Default: 0)
++
+ [[ConfluxProbeMinBytes]] **ConfluxProbeMinBytes** __NUM__::
+     DeltaTor extension: minimum delivered bytes a conflux set must move inside
+     one ConfluxProbeInterval window before its throughput estimate is trusted.
+diff --git a/src/app/config/config.c b/src/app/config/config.c
+index 5af7b99..9cdd554 100644
+--- a/src/app/config/config.c
++++ b/src/app/config/config.c
+@@ -392,6 +392,7 @@ static const config_var_t option_vars_[] = {
+   V(ConfluxSetRttMax,            INT,      "0"),
+   V(ConfluxSetRttPct,            INT,      "0"),
+   V(ConfluxProbeInterval,        INT,      "0"),
++  V(ConfluxProbeWarmupInterval,  INT,      "0"),
+   V(ConfluxProbeMinBytes,        INT,      "0"),
+   V(ConfluxProbeLog,             INT,      "0"),
+   V(ConfluxDrainPct,             INT,      "0"),
+@@ -3715,6 +3716,12 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
+            "and 100000000 bytes");
+   }
+ 
++  if (options->ConfluxProbeWarmupInterval < 0 ||
++      options->ConfluxProbeWarmupInterval > 3600) {
++    REJECT("ConfluxProbeWarmupInterval must be between 0 (off) and 3600 "
++           "seconds, and is only meaningful below ConfluxProbeInterval");
++  }
++
+   if (options->ConfluxProbeLog < 0 || options->ConfluxProbeLog > 3) {
+     REJECT("ConfluxProbeLog must be 0 (off), 1 (log the measured-throughput "
+            "set-selection mechanism alongside tor's own logs), 2 (log only "
+diff --git a/src/app/config/or_options_st.h b/src/app/config/or_options_st.h
+index 1528e72..3a3ca21 100644
+--- a/src/app/config/or_options_st.h
++++ b/src/app/config/or_options_st.h
+@@ -827,6 +827,15 @@ struct or_options_t {
+    * internal default of 32768 bytes. */
+   int ConfluxProbeMinBytes;
+ 
++  /** DeltaTor extension: early re-measurement interval, in seconds, for the
++   * measured-throughput policies. While a set's first ConfluxProbeInterval has
++   * not yet elapsed, its estimate is refreshed at most this often from the
++   * cumulative bytes and active time since the window opened (not from the
++   * short slice alone, which would be too noisy), so selection can start
++   * adapting before the first full window. 0 (default) disables the warm-up and
++   * waits for the full ConfluxProbeInterval, as before. */
++  int ConfluxProbeWarmupInterval;
++
+   /** DeltaTor extension: verbosity of the measured-throughput set-selection
+    * diagnostics (ConfluxSetSelection 4). 0 = off, 1 = log the mechanism
+    * alongside tor's own logs, 2 = log only the mechanism and suppress tor's
+diff --git a/src/core/or/conflux_params.c b/src/core/or/conflux_params.c
+index 3824850..3a4858a 100644
+--- a/src/core/or/conflux_params.c
++++ b/src/core/or/conflux_params.c
+@@ -289,6 +289,20 @@ conflux_params_get_probe_min_bytes(void)
+   return 32768;
+ }
+ 
++/** DeltaTor extension: early re-measurement interval, in seconds, for the
++ * measured-throughput policies. While a set's first ConfluxProbeInterval has
++ * not elapsed, its estimate is refreshed at most this often from the cumulative
++ * data since the window opened. 0 (default) disables the warm-up. */
++int
++conflux_params_get_probe_warmup(void)
++{
++  const or_options_t *opts = get_options();
++  if (opts && opts->ConfluxProbeWarmupInterval > 0) {
++    return opts->ConfluxProbeWarmupInterval;
++  }
++  return 0;
++}
++
+ /** DeltaTor extension: verbosity of the measured-throughput set-selection
+  * diagnostics (ConfluxProbeLog). 0 = off, 1 = mechanism logs only, 2 =
+  * mechanism logs with tor's own log lines suppressed, 3 = quiet: only a
+diff --git a/src/core/or/conflux_params.h b/src/core/or/conflux_params.h
+index 73c5580..2346c91 100644
+--- a/src/core/or/conflux_params.h
++++ b/src/core/or/conflux_params.h
+@@ -38,6 +38,7 @@ int conflux_params_get_set_selection(void);
+ int conflux_params_get_set_rtt_max(void);
+ int conflux_params_get_set_rtt_pct(void);
+ int conflux_params_get_probe_interval(void);
++int conflux_params_get_probe_warmup(void);
+ int conflux_params_get_probe_min_bytes(void);
+ int conflux_params_get_probe_log(void);
+ uint8_t conflux_params_get_drain_pct(void);
+diff --git a/src/core/or/conflux_pool.c b/src/core/or/conflux_pool.c
+index 228ef71..cf151e3 100644
+--- a/src/core/or/conflux_pool.c
++++ b/src/core/or/conflux_pool.c
+@@ -1646,6 +1646,28 @@ conflux_note_recv_activity(conflux_t *cfx)
+  * measurement window is first opened. */
+ static uint64_t conflux_mthr_next_id = 1;
+ 
++/** DeltaTor extension: length, in milliseconds, of the time the set actually
++ * delivered bytes during a window that has now lasted `elapsed_s` seconds,
++ * clamped to the wall clock so the two independent clocks cannot disagree.
++ * When no activity was recorded it returns the whole window, matching the old
++ * behaviour of dividing by the full elapsed time. */
++static uint64_t
++conflux_mthr_active_span_ms(const conflux_t *cfx, uint64_t elapsed_s)
++{
++  const bool had_activity = cfx->mthr_first_active_ms != 0 &&
++    cfx->mthr_last_active_ms >= cfx->mthr_first_active_ms;
++  uint64_t active_ms = had_activity ?
++    cfx->mthr_last_active_ms - cfx->mthr_first_active_ms : 0;
++  if (had_activity && active_ms == 0) {
++    /* A single delivered cell: keep it as a real (tiny) measurement. */
++    active_ms = 1;
++  }
++  if (active_ms > elapsed_s * 1000) {
++    active_ms = elapsed_s * 1000;
++  }
++  return active_ms ? active_ms : elapsed_s * 1000;
++}
++
+ /** DeltaTor extension: fold a set's elapsed measurement window into its
+  * smoothed throughput estimate. Called lazily when a new stream is placed, so
+  * no timer or per-cell accounting is needed: it only reads the set's existing
+@@ -1654,6 +1676,7 @@ static void
+ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+ {
+   const uint64_t interval = (uint64_t) conflux_params_get_probe_interval();
++  const uint64_t warmup = (uint64_t) conflux_params_get_probe_warmup();
+   const uint64_t min_bytes = (uint64_t) conflux_params_get_probe_min_bytes();
+   const int probe_log = conflux_params_get_probe_log();
+ 
+@@ -1665,24 +1688,67 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+     cfx->mthr_prev_recv = cfx->bytes_recv;
+     cfx->mthr_first_active_ms = 0;
+     cfx->mthr_last_active_ms = 0;
++    cfx->mthr_warmup_last = cfx->mthr_win_start;
+     conflux_mthr_stats.windows++;
+     if (probe_log) {
+       log_notice(LD_CONFLUXMTHR,
+                  "ConfluxProbe set#%"PRIu64" window opened: recv=%"PRIu64"B "
+-                 "interval=%"PRIu64"s min_bytes=%"PRIu64"B",
+-                 cfx->mthr_id, cfx->bytes_recv, interval, min_bytes);
++                 "interval=%"PRIu64"s warmup=%"PRIu64"s min_bytes=%"PRIu64"B",
++                 cfx->mthr_id, cfx->bytes_recv, interval, warmup, min_bytes);
+     }
+     return;
+   }
+ 
+-  /* Wait until a full window has elapsed (also tolerates a clock going
+-   * backwards by simply not rolling). */
+-  if (cfx->mthr_win_start > (uint64_t) now ||
+-      (uint64_t) now - cfx->mthr_win_start < interval) {
++  /* Tolerate a clock going backwards by simply not rolling. */
++  if (cfx->mthr_win_start > (uint64_t) now) {
+     return;
+   }
+-
+   const uint64_t elapsed = (uint64_t) now - cfx->mthr_win_start;
++
++  /* DeltaTor: warm-up. Until the first full ConfluxProbeInterval has elapsed,
++   * re-derive the estimate every ConfluxProbeWarmupInterval seconds so selection
++   * can start adapting early. A short slice would be too noisy to trust on its
++   * own, so this uses the cumulative bytes and active time since the window
++   * opened (the baseline and window start are deliberately not advanced) and
++   * overwrites the estimate instead of smoothing it, because every value
++   * already describes the whole interval since the window opened. It never
++   * decays: a set that has not moved enough bytes yet keeps its previous
++   * estimate until it has. */
++  if (warmup > 0 && elapsed < interval) {
++    if (cfx->mthr_warmup_last > (uint64_t) now ||
++        (uint64_t) now - cfx->mthr_warmup_last < warmup) {
++      return;
++    }
++    cfx->mthr_warmup_last = (uint64_t) now;
++
++    const uint64_t c_delta = (cfx->bytes_recv >= cfx->mthr_prev_recv) ?
++      cfx->bytes_recv - cfx->mthr_prev_recv : 0;
++    const uint64_t c_span_ms = conflux_mthr_active_span_ms(cfx, elapsed);
++    if (c_delta >= min_bytes && c_span_ms > 0) {
++      const uint64_t bps = (c_delta * 1000) / c_span_ms;
++      cfx->mthr_bps = bps;
++      if (conflux_mthr_detailed_logs(probe_log)) {
++        log_notice(LD_CONFLUXMTHR,
++                   "ConfluxProbe set#%"PRIu64" warmup: elapsed=%"PRIu64"s "
++                   "active=%"PRIu64".%03"PRIu64"s delta=%"PRIu64"B "
++                   "bps=%"PRIu64"B/s (cumulative)",
++                   cfx->mthr_id, elapsed, c_span_ms / 1000, c_span_ms % 1000,
++                   c_delta, bps);
++      }
++    } else if (conflux_mthr_detailed_logs(probe_log)) {
++      log_notice(LD_CONFLUXMTHR,
++                 "ConfluxProbe set#%"PRIu64" warmup: elapsed=%"PRIu64"s "
++                 "delta=%"PRIu64"B (low-traffic, not yet trusted)",
++                 cfx->mthr_id, elapsed, c_delta);
++    }
++    return;
++  }
++
++  /* Wait until a full window has elapsed. */
++  if (elapsed < interval) {
++    return;
++  }
++
+   const uint64_t delta = (cfx->bytes_recv >= cfx->mthr_prev_recv) ?
+     cfx->bytes_recv - cfx->mthr_prev_recv : 0;
+ 
+@@ -1692,21 +1758,11 @@ conflux_mthr_roll_window(conflux_t *cfx, time_t now)
+    * that did all its work in a short burst is not reported as slow (and its
+    * estimate is not decayed just because the client went quiet). The elapsed
+    * wall clock stays the upper bound: the two clocks are independent. */
+-  const bool had_activity = cfx->mthr_first_active_ms != 0 &&
+-    cfx->mthr_last_active_ms >= cfx->mthr_first_active_ms;
+-  uint64_t active_ms = had_activity ?
+-    cfx->mthr_last_active_ms - cfx->mthr_first_active_ms : 0;
+-  if (had_activity && active_ms == 0) {
+-    /* A single delivered cell: keep it as a real (tiny) measurement. */
+-    active_ms = 1;
+-  }
+-  if (active_ms > elapsed * 1000) {
+-    active_ms = elapsed * 1000;
+-  }
+-  const uint64_t span_ms = active_ms ? active_ms : elapsed * 1000;
++  const uint64_t span_ms = conflux_mthr_active_span_ms(cfx, elapsed);
+ 
+   cfx->mthr_prev_recv = cfx->bytes_recv;
+   cfx->mthr_win_start = (uint64_t) now;
++  cfx->mthr_warmup_last = cfx->mthr_win_start;
+   cfx->mthr_first_active_ms = 0;
+   cfx->mthr_last_active_ms = 0;
+ 
+diff --git a/src/core/or/conflux_st.h b/src/core/or/conflux_st.h
+index 6905ad0..bc44fa2 100644
+--- a/src/core/or/conflux_st.h
++++ b/src/core/or/conflux_st.h
+@@ -163,6 +163,13 @@ struct conflux_t {
+   uint64_t mthr_first_active_ms;
+   uint64_t mthr_last_active_ms;
+ 
++  /** DeltaTor: wall-clock (seconds since epoch) of the last warm-up
++   * re-evaluation of this window. While the first full ConfluxProbeInterval has
++   * not elapsed, the estimate is refreshed at most every
++   * ConfluxProbeWarmupInterval seconds. Initialised to the window start so the
++   * first refresh happens one warm-up interval after the window opened. */
++  uint64_t mthr_warmup_last;
++
+   /** DeltaTor: process-local, monotonically increasing id used only to label
+    * the ConfluxProbeLog diagnostic lines ("set#N"). Assigned lazily the first
+    * time the set's measurement window is opened. */
+-- 
+2.56.0.windows.2
+
